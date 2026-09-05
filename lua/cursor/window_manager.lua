@@ -37,20 +37,28 @@ function WindowManager.new()
 end
 
 
-function WindowManager:_is_named_chat_buf(buf)
+function WindowManager:_is_owned_chat_buf(buf)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then
     return false
   end
-  local name = vim.api.nvim_buf_get_name(buf)
-  return name:match('cursor%-chat%-history$')
-    or name:match('cursor%-chat%-input$')
-    or name:match('cursor%-chat%-affected$')
-    or name:match('cursor%-chat%-queue$')
+  return vim.b[buf].cursor_chat_panel == true
 end
 
 function WindowManager:wipe_named_buffers()
+  local seen = {}
+  for _, buf in ipairs({
+    self.chat_bufnr,
+    self.input_bufnr,
+    self.affected_bufnr,
+    self.queue_bufnr,
+  }) do
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      seen[buf] = true
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if self:_is_named_chat_buf(buf) then
+    if not seen[buf] and self:_is_owned_chat_buf(buf) then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
     end
   end
@@ -58,6 +66,7 @@ end
 
 function WindowManager:_create_panel_buf(name, readonly)
   local buf = vim.api.nvim_create_buf(false, true)
+  vim.b[buf].cursor_chat_panel = true
   vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
   vim.api.nvim_buf_set_option(buf, 'swapfile', false)
   pcall(vim.api.nvim_buf_set_name, buf, name)
