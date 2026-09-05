@@ -44,7 +44,7 @@ function WindowManager:_is_owned_chat_buf(buf)
   return vim.b[buf].cursor_chat_panel == true
 end
 
-function WindowManager:wipe_named_buffers()
+function WindowManager:wipe_owned_buffers()
   local seen = {}
   for _, buf in ipairs({
     self.chat_bufnr,
@@ -123,7 +123,7 @@ function WindowManager:_ui_opt(key, fallback)
 end
 
 function WindowManager:create_chat_window()
-  self:wipe_named_buffers()
+  self:wipe_owned_buffers()
 
   local chat_width = self.chat_width
   if self.opts and self.opts.chat_width then
@@ -254,7 +254,7 @@ function WindowManager:close_chat_window()
       pcall(vim.api.nvim_win_close, win, true)
     end
   end
-  self:wipe_named_buffers()
+  self:wipe_owned_buffers()
   self.chat_winid = nil
   self.chat_bufnr = nil
   self.affected_winid = nil
