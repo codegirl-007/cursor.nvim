@@ -36,6 +36,63 @@ function WindowManager.new()
   return self
 end
 
+
+function WindowManager:_is_named_chat_buf(buf)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return false
+  end
+  local name = vim.api.nvim_buf_get_name(buf)
+  return name:match('cursor%-chat%-history$')
+    or name:match('cursor%-chat%-input$')
+    or name:match('cursor%-chat%-affected$')
+    or name:match('cursor%-chat%-queue$')
+end
+
+function WindowManager:wipe_named_buffers()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if self:_is_named_chat_buf(buf) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
+end
+
+function WindowManager:_create_panel_buf(name, readonly)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
+  vim.api.nvim_buf_set_option(buf, 'swapfile', false)
+  pcall(vim.api.nvim_buf_set_name, buf, name)
+  vim.api.nvim_buf_set_option(buf, 'filetype', 'markdown')
+  if readonly then
+    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+    vim.api.nvim_buf_set_option(buf, 'readonly', true)
+  else
+    vim.api.nvim_buf_set_option(buf, 'modifiable', true)
+  end
+  return buf
+end
+
+function WindowManager:_watch_panel_close(win_field)
+  local buf_field = win_field:gsub('_winid$', '_bufnr')
+  local buf = self[buf_field]
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  vim.api.nvim_create_autocmd('WinClosed', {
+    buffer = buf,
+    callback = function()
+      self[win_field] = nil
+      if self._suppress_close or type(self.on_request_close) ~= 'function' then
+        return
+      end
+      vim.schedule(function()
+        if not self._suppress_close then
+          self.on_request_close()
+        end
+      end)
+    end,
+  })
+end
+
 function WindowManager:_ui_opt(key, fallback)
   if self.opts and self.opts.ui and self.opts.ui[key] ~= nil then
     return self.opts.ui[key]
@@ -44,6 +101,8 @@ function WindowManager:_ui_opt(key, fallback)
 end
 
 function WindowManager:create_chat_window()
+  self:wipe_named_buffers()
+
   local chat_width = self.chat_width
   if self.opts and self.opts.chat_width then
     chat_width = self.opts.chat_width
@@ -56,36 +115,10 @@ function WindowManager:create_chat_window()
   local queue_height = self:_ui_opt('queue_height', 4)
   local section_gap = self:_ui_opt('section_gap', 2)
   
-  self.chat_bufnr = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(self.chat_bufnr, 'cursor-chat-history')
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'swapfile', false)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
-  
-  self.input_bufnr = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(self.input_bufnr, 'cursor-chat-input')
-  vim.api.nvim_buf_set_option(self.input_bufnr, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(self.input_bufnr, 'swapfile', false)
-  vim.api.nvim_buf_set_option(self.input_bufnr, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(self.input_bufnr, 'modifiable', true)
-  
-  self.affected_bufnr = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(self.affected_bufnr, 'cursor-chat-affected')
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'swapfile', false)
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'modifiable', false)
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'readonly', true)
-
-  self.queue_bufnr = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(self.queue_bufnr, 'cursor-chat-queue')
-  vim.api.nvim_buf_set_option(self.queue_bufnr, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(self.queue_bufnr, 'swapfile', false)
-  vim.api.nvim_buf_set_option(self.queue_bufnr, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(self.queue_bufnr, 'modifiable', false)
-  vim.api.nvim_buf_set_option(self.queue_bufnr, 'readonly', true)
+  self.chat_bufnr = self:_create_panel_buf('cursor-chat-history', true)
+  self.input_bufnr = self:_create_panel_buf('cursor-chat-input', false)
+  self.affected_bufnr = self:_create_panel_buf('cursor-chat-affected', true)
+  self.queue_bufnr = self:_create_panel_buf('cursor-chat-queue', true)
   
   local input_height = self:_ui_opt('input_height', 3)
   local history_height = height - input_height - affected_height - queue_height - 6
@@ -185,53 +218,21 @@ function WindowManager:create_chat_window()
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
   self:update_panel_display()
-  
-  vim.api.nvim_create_autocmd('WinClosed', {
-    buffer = self.chat_bufnr,
-    callback = function()
-      self.chat_winid = nil
-      self.chat_bufnr = nil
-    end,
-  })
-  
-  vim.api.nvim_create_autocmd('WinClosed', {
-    buffer = self.affected_bufnr,
-    callback = function()
-      self.affected_winid = nil
-      self.affected_bufnr = nil
-    end,
-  })
 
-  vim.api.nvim_create_autocmd('WinClosed', {
-    buffer = self.queue_bufnr,
-    callback = function()
-      self.queue_winid = nil
-      self.queue_bufnr = nil
-    end,
-  })
-  
-  vim.api.nvim_create_autocmd('WinClosed', {
-    buffer = self.input_bufnr,
-    callback = function()
-      self.input_winid = nil
-      self.input_bufnr = nil
-    end,
-  })
+  self:_watch_panel_close('chat_winid')
+  self:_watch_panel_close('input_winid')
+  self:_watch_panel_close('affected_winid')
+  self:_watch_panel_close('queue_winid')
 end
 
 function WindowManager:close_chat_window()
-  if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-    vim.api.nvim_win_close(self.chat_winid, true)
+  self._suppress_close = true
+  for _, win in ipairs({ self.chat_winid, self.input_winid, self.affected_winid, self.queue_winid }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
   end
-  if self.affected_winid and vim.api.nvim_win_is_valid(self.affected_winid) then
-    vim.api.nvim_win_close(self.affected_winid, true)
-  end
-  if self.queue_winid and vim.api.nvim_win_is_valid(self.queue_winid) then
-    vim.api.nvim_win_close(self.queue_winid, true)
-  end
-  if self.input_winid and vim.api.nvim_win_is_valid(self.input_winid) then
-    vim.api.nvim_win_close(self.input_winid, true)
-  end
+  self:wipe_named_buffers()
   self.chat_winid = nil
   self.chat_bufnr = nil
   self.affected_winid = nil
@@ -240,6 +241,7 @@ function WindowManager:close_chat_window()
   self.queue_bufnr = nil
   self.input_winid = nil
   self.input_bufnr = nil
+  self._suppress_close = false
 end
 
 function WindowManager:set_panel_state(state)

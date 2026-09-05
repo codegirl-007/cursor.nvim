@@ -13,6 +13,9 @@ function AppManager.new()
   self.opts = {}
   self.cursor_manager = nil
   self.window_manager = WindowManager.new()
+  self.window_manager.on_request_close = function()
+    self:close()
+  end
   self.chat_manager = ChatManager.new()
   self.binding_manager = nil
   self.commands = nil
