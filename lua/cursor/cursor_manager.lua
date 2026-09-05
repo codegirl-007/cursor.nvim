@@ -15,8 +15,8 @@ function CursorManager.new(opts)
   self.acp.args = self.acp.args or { 'acp' }
   self.acp.auth_method = self.acp.auth_method or 'cursor_login'
 
-  -- Legacy model option is kept for compatibility but unused in ACP mode
   self.model = opts.model or 'auto'
+  self._config_options = nil
 
   -- JSON-RPC / ACP state
   self.proc_job_id = nil
@@ -51,7 +51,12 @@ function CursorManager:_ensure_acp_process()
   end
 
   local cmd = { self.acp.command }
-  for _, arg in ipairs(self.acp.args or {}) do
+  local model = self.model
+  if model and model ~= '' and model ~= 'auto' then
+    table.insert(cmd, '--model')
+    table.insert(cmd, model)
+  end
+  for _, arg in ipairs(self.acp.args or { 'acp' }) do
     table.insert(cmd, arg)
   end
 
@@ -1478,6 +1483,9 @@ function CursorManager:_ensure_session(current_file, cb)
     }, function(result, _err)
       if result and result.sessionId then
         self.session_id = result.sessionId
+        if type(result.configOptions) == 'table' then
+          self._config_options = result.configOptions
+        end
         done(true)
       else
         done(false)
@@ -1884,6 +1892,93 @@ function CursorManager:get_session_context(current_file)
   end
 
   return table.concat(parts, '\n')
+end
+
+
+local model_cache = { items = nil, at = 0 }
+
+function CursorManager.list_models()
+  if model_cache.items and (os.time() - model_cache.at) < 60 then
+    return model_cache.items
+  end
+
+  local out = vim.fn.system({ 'agent', '--list-models' })
+  if vim.v.shell_error ~= 0 then
+    return {}
+  end
+
+  local items = {}
+  for line in tostring(out):gmatch('[^\r\n]+') do
+    local id, name = line:match('^(%S+)%s+%-%s+(.+)$')
+    if id and name and not line:match('^Tip:') then
+      table.insert(items, { id = id, name = name })
+    end
+  end
+  model_cache.items = items
+  model_cache.at = os.time()
+  return items
+end
+
+function CursorManager:get_model()
+  return self.model or 'auto'
+end
+
+function CursorManager:_model_config_option()
+  if type(self._config_options) ~= 'table' then
+    return nil
+  end
+  for _, opt in ipairs(self._config_options) do
+    if type(opt) == 'table' then
+      local id = opt.configId or opt.id
+      if opt.category == 'model' or id == 'model' then
+        return opt
+      end
+    end
+  end
+  return nil
+end
+
+function CursorManager:set_model(model_id, cb)
+  cb = cb or function() end
+  model_id = model_id or 'auto'
+
+  local function restart()
+    self:stop()
+    self.initialized = false
+    self.authenticated = false
+    self.session_id = nil
+    self._config_options = nil
+    self.model = model_id
+    cb(true, 'restart')
+  end
+
+  if model_id == self.model then
+    cb(true, 'unchanged')
+    return
+  end
+
+  local opt = self:_model_config_option()
+  if opt and self.session_id and self.proc_job_id and self.proc_job_id > 0 then
+    self:_send_request('session/set_config_option', {
+      sessionId = self.session_id,
+      configId = opt.configId or opt.id or 'model',
+      type = 'id',
+      value = model_id,
+    }, function(result, err)
+      if result then
+        self.model = model_id
+        if type(result.configOptions) == 'table' then
+          self._config_options = result.configOptions
+        end
+        cb(true, 'acp')
+      else
+        restart()
+      end
+    end)
+    return
+  end
+
+  restart()
 end
 
 function CursorManager:stop()

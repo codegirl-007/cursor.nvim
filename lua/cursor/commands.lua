@@ -85,6 +85,27 @@ function Commands:register()
   end, {
     desc = "Revert last cursor checkpointed changes",
   })
+
+  vim.api.nvim_create_user_command("CursorModel", function(opts)
+    local id = opts.args
+    if id == '' then
+      self.app_manager:pick_model()
+      return
+    end
+    self.app_manager:set_model(id)
+  end, {
+    desc = "Choose Cursor model (or :CursorModel <id>)",
+    nargs = "?",
+    complete = function(arglead)
+      local matches = {}
+      for _, item in ipairs(require('cursor.cursor_manager').list_models()) do
+        if item.id:sub(1, #arglead) == arglead then
+          table.insert(matches, item.id)
+        end
+      end
+      return matches
+    end,
+  })
 end
 
 return Commands
