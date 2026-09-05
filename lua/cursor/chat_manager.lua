@@ -206,52 +206,70 @@ function ChatManager:load_state(state)
   end
 end
 
+ChatManager.USER_LABEL = 'You'
+ChatManager.ASSISTANT_LABEL = 'Assistant'
+
+local function content_lines(content)
+  if type(content) ~= 'string' or content == '' then
+    return { content or '' }
+  end
+  local lines = vim.split(content, '\n', { plain = true, trimempty = false })
+  for i, line in ipairs(lines) do
+    lines[i] = line:gsub('\r', '')
+  end
+  return lines
+end
+
+local function is_activity_content(content)
+  return type(content) == 'string' and content:match('^Activity:') ~= nil
+end
+
+function ChatManager:get_activity_line()
+  for i = #self.messages, 1, -1 do
+    local msg = self.messages[i]
+    if msg.role == 'assistant' and is_activity_content(msg.content) then
+      return msg.content
+    end
+    if msg.role == 'user' or (msg.role == 'assistant' and not is_activity_content(msg.content)) then
+      return nil
+    end
+  end
+  return nil
+end
+
+function ChatManager:get_status_lines()
+  local lines = {}
+  if self:get_status() == 'idle' then
+    return lines
+  end
+  local activity = self:get_activity_line()
+  if activity then
+    table.insert(lines, activity)
+  end
+  local status = self:get_status_indicator()
+  if status ~= '' then
+    table.insert(lines, status)
+  end
+  return lines
+end
+
 function ChatManager:format_messages_for_display()
   local formatted = {}
-  
-  for i, msg in ipairs(self.messages) do
-    if msg.role == 'user' then
-      table.insert(formatted, '## You')
+  local roles = {}
+
+  for _, msg in ipairs(self.messages) do
+    if (msg.role == 'user' or msg.role == 'assistant') and not is_activity_content(msg.content) then
+      table.insert(roles, { line = #formatted, role = msg.role })
+      table.insert(formatted, msg.role == 'user' and ChatManager.USER_LABEL or ChatManager.ASSISTANT_LABEL)
       table.insert(formatted, '')
-      
-      local content_lines = {}
-      for line in msg.content:gmatch('[^\r\n]+') do
-        table.insert(content_lines, line)
-      end
-      
-      if #content_lines == 0 then
-        table.insert(content_lines, msg.content)
-      end
-      
-      for _, line in ipairs(content_lines) do
+      for _, line in ipairs(content_lines(msg.content)) do
         table.insert(formatted, line)
       end
-      
-      table.insert(formatted, '')
-    elseif msg.role == 'assistant' then
-      table.insert(formatted, '## Assistant')
-      table.insert(formatted, '')
-      
-      local content_lines = {}
-      for line in msg.content:gmatch('[^\r\n]+') do
-        table.insert(content_lines, line)
-      end
-      
-      if #content_lines == 0 then
-        table.insert(content_lines, msg.content)
-      end
-      
-      for _, line in ipairs(content_lines) do
-        table.insert(formatted, line)
-      end
-      
-      table.insert(formatted, '')
-      table.insert(formatted, '---')
       table.insert(formatted, '')
     end
   end
 
-  return formatted
+  return formatted, roles
 end
 
 return ChatManager

@@ -1,3 +1,12 @@
+local ChatManager = require('cursor.chat_manager')
+
+local role_ns = vim.api.nvim_create_namespace('cursor.chat.roles')
+
+local function ensure_role_highlights()
+  vim.api.nvim_set_hl(0, 'CursorChatYou', { default = true, link = 'DiagnosticInfo' })
+  vim.api.nvim_set_hl(0, 'CursorChatAssistant', { default = true, link = 'Special' })
+end
+
 local WindowManager = {}
 WindowManager.__index = WindowManager
 
@@ -113,6 +122,27 @@ function WindowManager:_close_panel_internal(win_field)
   pcall(vim.api.nvim_win_close, win, true)
   self[win_field] = nil
   self._suppress_close = previous
+end
+
+function WindowManager:_highlight_roles(buf, roles)
+  buf = buf or self.chat_bufnr
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  ensure_role_highlights()
+  vim.api.nvim_buf_clear_namespace(buf, role_ns, 0, -1)
+  for _, entry in ipairs(roles or {}) do
+    local line = entry.line
+    local role = entry.role
+    if type(line) == 'number' and line >= 0 then
+      local hl = role == 'user' and 'CursorChatYou' or 'CursorChatAssistant'
+      local label = role == 'user' and ChatManager.USER_LABEL or ChatManager.ASSISTANT_LABEL
+      pcall(vim.api.nvim_buf_set_extmark, buf, role_ns, line, 0, {
+        end_col = #label,
+        hl_group = hl,
+      })
+    end
+  end
 end
 
 function WindowManager:_ui_opt(key, fallback)
@@ -236,9 +266,10 @@ function WindowManager:create_chat_window()
   vim.api.nvim_feedkeys('i', 'n', false)
   
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
-  vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, {'# Cursor Chat', ''})
+  vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, { 'Cursor Chat', '' })
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
+  self:_highlight_roles(self.chat_bufnr)
   self:update_panel_display()
 
   self:_watch_panel_close('chat_winid')
@@ -477,236 +508,100 @@ function WindowManager:update_panel_display()
   end
 end
 
+function WindowManager:_render_chat_lines(lines, roles)
+  if not self.chat_bufnr or not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
+    return
+  end
+  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
+  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', false)
+  vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, lines)
+  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
+  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
+  self:_highlight_roles(self.chat_bufnr, roles)
+
+  if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
+    local line_count = vim.api.nvim_buf_line_count(self.chat_bufnr)
+    if line_count > 0 then
+      vim.api.nvim_win_set_cursor(self.chat_winid, {line_count, 0})
+    end
+  end
+end
+
+function WindowManager:_with_status_footer(formatted, chat_manager)
+  local status_lines = chat_manager:get_status_lines()
+  if #status_lines == 0 then
+    return formatted
+  end
+  table.insert(formatted, '')
+  for _, line in ipairs(status_lines) do
+    table.insert(formatted, line)
+  end
+  return formatted
+end
+
 function WindowManager:update_chat_display(chat_manager)
   if not self.chat_bufnr or not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
     return
   end
-  
+
   self.last_displayed_content = ''
-  local formatted = chat_manager:format_messages_for_display()
-  
+  local formatted, roles = chat_manager:format_messages_for_display()
+  roles = roles or {}
+
   if #formatted == 0 then
-    formatted = {'# Cursor Chat', ''}
+    formatted = { 'Cursor Chat', '' }
+    roles = {}
   end
-  
-  local status = chat_manager:get_status()
-  if status ~= 'idle' then
-    local status_indicator = chat_manager:get_status_indicator()
-    if status_indicator ~= '' then
-      local has_assistant = false
-      for _, line in ipairs(formatted) do
-        if line == '## Assistant' then
-          has_assistant = true
-          break
-        end
-      end
-      
-      if not has_assistant then
-        table.insert(formatted, '## Assistant')
-        table.insert(formatted, '')
-      end
-      
-      table.insert(formatted, status_indicator)
-    end
-  end
-  
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', false)
-  vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, formatted)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
-  
-  if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-    local line_count = vim.api.nvim_buf_line_count(self.chat_bufnr)
-    if line_count > 0 then
-      local cursor_line = math.min(line_count, #formatted)
-      vim.api.nvim_win_set_cursor(self.chat_winid, {cursor_line, 0})
-    end
-  end
+
+  self:_render_chat_lines(self:_with_status_footer(formatted, chat_manager), roles)
 end
 
 function WindowManager:update_chat_display_streaming(chat_manager, streaming_response)
   if not self.chat_bufnr or not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
     return
   end
-  
+
   local new_content = streaming_response or ''
   if new_content == '' then
     return
   end
-  
+
   local clean_content = new_content
   clean_content = clean_content:gsub('{%s*"[^"]*"%s*:%s*[^}]*}', '')
   clean_content = clean_content:gsub('"type"%s*:%s*"[^"]*"', '')
   clean_content = clean_content:gsub('"text"%s*:%s*"([^"]*)"', '%1')
-  
+
   if clean_content == '' or clean_content:match('^%s*{%s*$') then
     return
   end
-  
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
-  vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', false)
-  
-  local current_lines = vim.api.nvim_buf_get_lines(self.chat_bufnr, 0, -1, false)
-  local assistant_start_idx = nil
-  local streaming_marker_idx = nil
-  
-  for i, line in ipairs(current_lines) do
-      if line == '## Assistant' then
-        assistant_start_idx = i
-      elseif line:match('^[⏳✨⏹]') or line:match('Processing') or line:match('Streaming') or line:match('Stopped') then
-        streaming_marker_idx = i
-    end
+
+  local formatted, roles = chat_manager:format_messages_for_display()
+  roles = roles or {}
+  if #formatted == 0 then
+    formatted = {}
+    roles = {}
   end
-  
-  if not assistant_start_idx then
-    local formatted = chat_manager:format_messages_for_display()
-    table.insert(formatted, '## Assistant')
+
+  local last_role = roles[#roles]
+  if not last_role or last_role.role ~= 'assistant' then
+    table.insert(roles, { line = #formatted, role = 'assistant' })
+    table.insert(formatted, ChatManager.ASSISTANT_LABEL)
     table.insert(formatted, '')
-    vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, formatted)
-    assistant_start_idx = #formatted
-    streaming_marker_idx = nil
   end
-  
-  local delta = ''
-  if #clean_content > #self.last_displayed_content then
-    delta = clean_content:sub(#self.last_displayed_content + 1)
-  elseif clean_content ~= self.last_displayed_content then
-    delta = clean_content
-    self.last_displayed_content = ''
+
+  local stream_lines = vim.split(clean_content, '\n', { plain = true, trimempty = false })
+  for i, line in ipairs(stream_lines) do
+    stream_lines[i] = line:gsub('\r', '')
   end
-  
-  if delta ~= '' then
-    -- Remove streaming marker if it exists
-    if streaming_marker_idx then
-      local marker_start = streaming_marker_idx - 1
-      if marker_start > 0 and current_lines[marker_start] == '' then
-        marker_start = marker_start - 1
-      end
-      vim.api.nvim_buf_set_lines(self.chat_bufnr, marker_start, streaming_marker_idx, false, {})
-    end
-    
-    local parts = {}
-    local current_part = ''
-    
-    for i = 1, #delta do
-      local char = delta:sub(i, i)
-      if char == '\n' then
-        if current_part ~= '' then
-          table.insert(parts, {text = current_part, newline = true})
-          current_part = ''
-        else
-          table.insert(parts, {text = '', newline = true})
-        end
-      elseif char ~= '\r' then
-        current_part = current_part .. char
-      end
-    end
-    
-    if current_part ~= '' then
-      table.insert(parts, {text = current_part, newline = false})
-    end
-    
-    for _, part in ipairs(parts) do
-      if not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
-        break
-      end
-      
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', false)
-      
-      local line_count = vim.api.nvim_buf_line_count(self.chat_bufnr)
-      
-      if part.newline then
-        if part.text ~= '' then
-          vim.api.nvim_buf_set_lines(self.chat_bufnr, -1, -1, false, {part.text})
-        else
-          vim.api.nvim_buf_set_lines(self.chat_bufnr, -1, -1, false, {''})
-        end
-      else
-        if line_count > 0 then
-          local last_idx = line_count - 1
-          local last_line = vim.api.nvim_buf_get_lines(self.chat_bufnr, last_idx, last_idx + 1, false)[1] or ''
-          vim.api.nvim_buf_set_lines(self.chat_bufnr, last_idx, last_idx + 1, false, {last_line .. part.text})
-        else
-          vim.api.nvim_buf_set_lines(self.chat_bufnr, -1, -1, false, {part.text})
-        end
-      end
-    end
-    
-    self.last_displayed_content = clean_content
-    
-    local current_lines = vim.api.nvim_buf_get_lines(self.chat_bufnr, 0, -1, false)
-    local status_line_idx = nil
-    
-    for i, line in ipairs(current_lines) do
-      if line:match('^[⏳✨⏹]') or line:match('Processing') or line:match('Streaming') or line:match('Stopped') then
-        status_line_idx = i
-        break
-      end
-    end
-    
-    local status_indicator = chat_manager:get_status_indicator()
-    if status_indicator ~= '' then
-      if status_line_idx then
-        vim.api.nvim_buf_set_lines(self.chat_bufnr, status_line_idx - 1, status_line_idx, false, {status_indicator})
-      else
-        vim.api.nvim_buf_set_lines(self.chat_bufnr, -1, -1, false, {'', status_indicator})
-      end
-    elseif status_line_idx then
-      local marker_start = status_line_idx - 1
-      if marker_start > 0 and current_lines[marker_start] == '' then
-        marker_start = marker_start - 1
-      end
-      vim.api.nvim_buf_set_lines(self.chat_bufnr, marker_start, status_line_idx, false, {})
-    end
-    
-    vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
-    vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
-    
-    if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-      local line_count = vim.api.nvim_buf_line_count(self.chat_bufnr)
-      if line_count > 0 then
-        vim.api.nvim_win_set_cursor(self.chat_winid, {line_count, 0})
-      end
-    end
-    return
-  else
-    local status_indicator = chat_manager:get_status_indicator()
-    if status_indicator ~= '' then
-      local current_lines = vim.api.nvim_buf_get_lines(self.chat_bufnr, 0, -1, false)
-      local status_line_idx = nil
-      
-      for i, line in ipairs(current_lines) do
-        if line:match('^[⏳✨⏹]') or line:match('Processing') or line:match('Streaming') or line:match('Stopped') then
-          status_line_idx = i
-          break
-        end
-      end
-      
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', false)
-      
-      if status_line_idx then
-        vim.api.nvim_buf_set_lines(self.chat_bufnr, status_line_idx - 1, status_line_idx, false, {status_indicator})
-      else
-        vim.api.nvim_buf_set_lines(self.chat_bufnr, -1, -1, false, {'', status_indicator})
-      end
-      
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
-    else
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
-      vim.api.nvim_buf_set_option(self.chat_bufnr, 'readonly', true)
-    end
-    
-    if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-      local line_count = vim.api.nvim_buf_line_count(self.chat_bufnr)
-      if line_count > 0 then
-        vim.api.nvim_win_set_cursor(self.chat_winid, {line_count, 0})
-      end
-    end
+  if #stream_lines == 0 then
+    stream_lines = { '' }
   end
+  for _, line in ipairs(stream_lines) do
+    table.insert(formatted, line)
+  end
+
+  self.last_displayed_content = clean_content
+  self:_render_chat_lines(self:_with_status_footer(formatted, chat_manager), roles)
 end
 
 function WindowManager:get_user_input()
