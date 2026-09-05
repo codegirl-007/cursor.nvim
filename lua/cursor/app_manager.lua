@@ -309,15 +309,26 @@ function AppManager:set_model(model_id)
   if not model_id or model_id == '' then
     return
   end
+  -- Hold the queue across the model change so stop/cancel cannot start
+  -- the next request on the old process, and so a late completion
+  -- callback cannot drain the queue before the new model is ready.
+  self._hold_queue = true
   if self.request_in_flight then
-    self:stop_request()
+    local stopped = self:stop_request({ process_next = false })
+    if not stopped then
+      self.request_in_flight = false
+      self.current_request = nil
+      self:_finalize_checkpoint()
+    end
   end
   self:_ensure_session_store()
   self.session_store.model = model_id
   self:_save_session_store()
   local function done()
+    self._hold_queue = false
     self:_sync_queue_display(false)
     vim.notify('Cursor model: ' .. model_id, vim.log.levels.INFO)
+    self:_process_next_request()
   end
   if self.cursor_manager then
     self.cursor_manager:set_model(model_id, function()
@@ -998,7 +1009,7 @@ end
 
 
 function AppManager:_process_next_request()
-  if self.request_in_flight then
+  if self._hold_queue or self.request_in_flight then
     return
   end
 
@@ -1078,7 +1089,10 @@ function AppManager:send_message(message_or_item)
 end
 
 
-function AppManager:stop_request()
+function AppManager:stop_request(opts)
+  opts = opts or {}
+  local process_next = opts.process_next ~= false
+
   if self.cursor_manager then
     local stopped = self.cursor_manager:stop()
     if stopped then
@@ -1100,7 +1114,9 @@ function AppManager:stop_request()
       
       self.window_manager:focus_input()
       self:_sync_queue_display(true)
-      self:_process_next_request()
+      if process_next then
+        self:_process_next_request()
+      end
     end
     return stopped
   end
