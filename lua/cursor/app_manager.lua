@@ -823,61 +823,10 @@ function AppManager:close()
   if not self.is_open then
     return
   end
-  
-  local chat_content = self.chat_manager:format_messages_for_display()
-  local streaming_response = self.chat_manager:get_streaming_response()
-  if streaming_response and streaming_response ~= '' then
-    local has_assistant = false
-    for _, line in ipairs(chat_content) do
-      if line == '## Assistant' then
-        has_assistant = true
-        break
-      end
-    end
-    
-    if not has_assistant then
-      table.insert(chat_content, '## Assistant')
-      table.insert(chat_content, '')
-    end
-    
-    local streaming_lines = {}
-    for line in streaming_response:gmatch('[^\r\n]+') do
-      table.insert(streaming_lines, line)
-    end
-    if #streaming_lines == 0 then
-      table.insert(streaming_lines, streaming_response)
-    end
-    
-    for _, line in ipairs(streaming_lines) do
-      table.insert(chat_content, line)
-    end
-  end
-  
-  local status = self.chat_manager:get_status()
-  if status ~= 'idle' then
-    local status_indicator = self.chat_manager:get_status_indicator()
-    if status_indicator ~= '' then
-      table.insert(chat_content, '')
-      table.insert(chat_content, status_indicator)
-    end
-  end
-  
-  local chat_bufnr = vim.fn.bufnr('cursor-chat-history', true)
-  if chat_bufnr == -1 then
-    chat_bufnr = vim.api.nvim_create_buf(true, false)
-    vim.api.nvim_buf_set_name(chat_bufnr, 'cursor-chat-history')
-  end
-  
-  vim.api.nvim_buf_set_option(chat_bufnr, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(chat_bufnr, 'modifiable', true)
-  vim.api.nvim_buf_set_option(chat_bufnr, 'readonly', false)
-  vim.api.nvim_buf_set_lines(chat_bufnr, 0, -1, false, chat_content)
-  vim.cmd('split')
-  vim.api.nvim_set_current_buf(chat_bufnr)
-  
-  self.window_manager:close_chat_window()
+
   self:_persist_current_session()
   self.chat_manager:cleanup()
+  self.window_manager:close_chat_window()
   self.is_open = false
 end
 
