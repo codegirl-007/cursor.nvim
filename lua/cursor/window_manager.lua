@@ -102,6 +102,19 @@ function WindowManager:_watch_panel_close(win_field)
   })
 end
 
+
+function WindowManager:_close_panel_internal(win_field)
+  local win = self[win_field]
+  if not win or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  local previous = self._suppress_close
+  self._suppress_close = true
+  pcall(vim.api.nvim_win_close, win, true)
+  self[win_field] = nil
+  self._suppress_close = previous
+end
+
 function WindowManager:_ui_opt(key, fallback)
   if self.opts and self.opts.ui and self.opts.ui[key] ~= nil then
     return self.opts.ui[key]
@@ -424,9 +437,8 @@ function WindowManager:update_panel_display()
       base_row,
       self.layout.affected_height
     )
-  elseif self.affected_winid and vim.api.nvim_win_is_valid(self.affected_winid) then
-    vim.api.nvim_win_close(self.affected_winid, true)
-    self.affected_winid = nil
+  else
+    self:_close_panel_internal('affected_winid')
   end
 
   local input_row = self.layout.base_row
@@ -451,10 +463,7 @@ function WindowManager:update_panel_display()
     end
     input_row = queue_row + self.layout.queue_height + gap
   else
-    if self.queue_winid and vim.api.nvim_win_is_valid(self.queue_winid) then
-      vim.api.nvim_win_close(self.queue_winid, true)
-      self.queue_winid = nil
-    end
+    self:_close_panel_internal('queue_winid')
     input_row = queue_row
   end
 
