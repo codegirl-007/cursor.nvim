@@ -1444,6 +1444,44 @@ function AppManager:_save_file_buffers(path)
   end
 end
 
+function AppManager:_review_entry(path)
+  local normalized = self:_normalize_checkpoint_path(path)
+  if not normalized then
+    return nil, nil
+  end
+  return normalized, (self.review or {})[normalized]
+end
+
+function AppManager:_review_status(path)
+  local _, entry = self:_review_entry(path)
+  if type(entry) == 'table' then
+    return entry.status
+  end
+  if entry == 'pending' or entry == 'accepted' or entry == 'rejected' then
+    return entry
+  end
+  return nil
+end
+
+function AppManager:_is_review_pending(path)
+  return self:_review_status(path) == 'pending'
+end
+
+function AppManager:_capture_review_baseline(path)
+  local _, snap = self:_snapshot_for_path(path)
+  if type(snap) == 'table' then
+    return {
+      exists = snap.exists and true or false,
+      content = snap.content or '',
+    }
+  end
+  local readable = vim.fn.filereadable(path) == 1
+  if not readable then
+    return { exists = false, content = '' }
+  end
+  return { exists = true, content = self:_read_file_raw(path) or '' }
+end
+
 function AppManager:_mark_review_pending(paths)
   self.review = self.review or {}
   if type(paths) ~= 'table' then
@@ -1452,29 +1490,34 @@ function AppManager:_mark_review_pending(paths)
   for _, path in ipairs(paths) do
     local normalized = self:_normalize_checkpoint_path(path)
     if normalized then
-      self.review[normalized] = 'pending'
+      local existing = self.review[normalized]
+      if not (type(existing) == 'table' and existing.status == 'pending' and existing.baseline) then
+        self.review[normalized] = {
+          status = 'pending',
+          baseline = self:_capture_review_baseline(normalized),
+        }
+      end
     end
   end
 end
 
-function AppManager:_review_status(path)
+function AppManager:_clear_review_entry(path)
   local normalized = self:_normalize_checkpoint_path(path)
+  if normalized and self.review then
+    self.review[normalized] = nil
+  end
+end
+
+function AppManager:_review_baseline(path)
+  local normalized, entry = self:_review_entry(path)
   if not normalized then
-    return nil
+    return nil, nil
   end
-  return (self.review or {})[normalized]
-end
-
-function AppManager:_is_review_pending(path)
-  return self:_review_status(path) == 'pending'
-end
-
-function AppManager:_set_review_status(path, status)
-  self.review = self.review or {}
-  local normalized = self:_normalize_checkpoint_path(path)
-  if normalized then
-    self.review[normalized] = status
+  if type(entry) == 'table' and type(entry.baseline) == 'table' then
+    return normalized, entry.baseline
   end
+  local _, snap = self:_snapshot_for_path(normalized)
+  return normalized, snap
 end
 
 function AppManager:_restore_file_from_entry(path, entry)
@@ -1548,8 +1591,8 @@ function AppManager:_review_paths()
   for _, path in ipairs(self.chat_manager:get_affected_files() or {}) do
     add(path)
   end
-  for path, status in pairs(self.review or {}) do
-    if status == 'pending' then
+  for path, entry in pairs(self.review or {}) do
+    if (type(entry) == 'table' and entry.status == 'pending') or entry == 'pending' then
       add(path)
     end
   end
@@ -1603,7 +1646,7 @@ function AppManager:accept_change(path, opts)
     end
     return false
   end
-  self:_set_review_status(path, 'accepted')
+  self:_clear_review_entry(path)
   self:_save_file_buffers(path)
   if not opts.nosync then
     self:_sync_changes_quickfix(false)
@@ -1616,7 +1659,7 @@ end
 
 function AppManager:reject_change(path, opts)
   opts = opts or {}
-  local normalized, entry = self:_snapshot_for_path(path or self:_review_path_under_cursor())
+  local normalized, entry = self:_review_baseline(path or self:_review_path_under_cursor())
   if not normalized then
     if not opts.silent then
       vim.notify('No change under cursor.', vim.log.levels.INFO)
@@ -1639,7 +1682,7 @@ function AppManager:reject_change(path, opts)
   elseif not opts.silent then
     vim.notify('Already matches snapshot: ' .. vim.fn.fnamemodify(normalized, ':.'), vim.log.levels.INFO)
   end
-  self:_set_review_status(normalized, 'rejected')
+  self:_clear_review_entry(normalized)
   self:_save_file_buffers(normalized)
   if not opts.nosync then
     self:_sync_changes_quickfix(false)
@@ -1686,7 +1729,7 @@ function AppManager:reject_all_changes()
 end
 
 function AppManager:diff_change(path)
-  local normalized, entry = self:_snapshot_for_path(path or self:_review_path_under_cursor())
+  local normalized, entry = self:_review_baseline(path or self:_review_path_under_cursor())
   if not normalized then
     vim.notify('No change under cursor.', vim.log.levels.INFO)
     return
