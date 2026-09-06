@@ -148,9 +148,100 @@ function BindingManager:register_chat_bindings(window_manager)
   register_history_bindings(affected_bufnr)
   register_history_bindings(queue_bufnr)
 
+  vim.bo[input_bufnr].completefunc = "v:lua.require'cursor.slash'.complete"
+  vim.api.nvim_buf_call(input_bufnr, function()
+    pcall(function()
+      require('cmp').setup.buffer { enabled = false }
+    end)
+  end)
+
+  local function apply_completeopt()
+    if vim.b[input_bufnr].cursor_saved_completeopt == nil then
+      vim.b[input_bufnr].cursor_saved_completeopt = vim.o.completeopt
+    end
+    vim.o.completeopt = 'menu,menuone,noinsert'
+  end
+  apply_completeopt()
+
+  vim.api.nvim_create_autocmd('InsertEnter', {
+    buffer = input_bufnr,
+    callback = apply_completeopt,
+  })
+  vim.api.nvim_create_autocmd('InsertLeave', {
+    buffer = input_bufnr,
+    callback = function()
+      local saved = vim.b[input_bufnr].cursor_saved_completeopt
+      if saved then
+        vim.o.completeopt = saved
+        vim.b[input_bufnr].cursor_saved_completeopt = nil
+      end
+    end,
+  })
+
+  local slash_complete_pending = false
+  vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChangedP' }, {
+    buffer = input_bufnr,
+    callback = function()
+      if slash_complete_pending then
+        return
+      end
+      slash_complete_pending = true
+      vim.schedule(function()
+        slash_complete_pending = false
+        if not vim.api.nvim_buf_is_valid(input_bufnr) then
+          return
+        end
+        if vim.api.nvim_get_current_buf() ~= input_bufnr then
+          return
+        end
+        require('cursor.slash').try_complete()
+      end)
+    end,
+  })
+
+  vim.keymap.set('i', '<Tab>', function()
+    if vim.fn.pumvisible() == 1 then
+      return '<C-n>'
+    end
+    local col = vim.fn.col('.')
+    local line = vim.api.nvim_get_current_line()
+    local before = line:sub(1, col - 1)
+    if before:match('^%s*/') then
+      return '<C-x><C-u>'
+    end
+    return '<Tab>'
+  end, {
+    buffer = input_bufnr,
+    expr = true,
+    silent = true,
+    desc = 'cursor chat: complete slash command',
+  })
+
+  vim.keymap.set('i', '<S-Tab>', function()
+    if vim.fn.pumvisible() == 1 then
+      return '<C-p>'
+    end
+    return '<S-Tab>'
+  end, {
+    buffer = input_bufnr,
+    expr = true,
+    silent = true,
+    desc = 'cursor chat: previous slash completion',
+  })
+
   vim.keymap.set('i', '<CR>', function()
+    if vim.fn.pumvisible() == 1 then
+      local word = require('cursor.slash').selected_word()
+      local typed = window_manager:get_user_input()
+      local already = word and (typed == word or typed:sub(-#word) == word)
+      if not already then
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
+        return
+      end
+    end
+
     local message = window_manager:get_user_input()
-    
+
     if message ~= '' and not message:match('^%s*$') then
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
       vim.schedule(function()
@@ -158,11 +249,11 @@ function BindingManager:register_chat_bindings(window_manager)
       end)
       return
     end
-    
+
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'n', false)
   end, {
     buffer = input_bufnr,
-    desc = "cursor chat: send message or newline",
+    desc = "cursor chat: accept slash command or send",
     silent = true,
     noremap = true,
   })
