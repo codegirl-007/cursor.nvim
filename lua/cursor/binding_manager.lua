@@ -148,9 +148,126 @@ function BindingManager:register_chat_bindings(window_manager)
   register_history_bindings(affected_bufnr)
   register_history_bindings(queue_bufnr)
 
+  vim.bo[input_bufnr].completefunc = "v:lua.require'cursor.slash'.complete"
+  vim.api.nvim_buf_call(input_bufnr, function()
+    pcall(function()
+      require('cmp').setup.buffer { enabled = false }
+    end)
+  end)
+
+  -- Keep the previous completeopt in a closure so we can restore it if
+  -- the input buffer is wiped while still in insert (InsertLeave may
+  -- not run, and vim.b is already gone).
+  local saved_completeopt = nil
+
+  local function apply_completeopt()
+    if saved_completeopt == nil then
+      saved_completeopt = vim.o.completeopt
+    end
+    if vim.api.nvim_buf_is_valid(input_bufnr) then
+      vim.b[input_bufnr].cursor_saved_completeopt = saved_completeopt
+    end
+    vim.o.completeopt = 'menu,menuone,noinsert'
+  end
+
+  local function restore_completeopt()
+    if saved_completeopt == nil then
+      return
+    end
+    vim.o.completeopt = saved_completeopt
+    saved_completeopt = nil
+    if vim.api.nvim_buf_is_valid(input_bufnr) then
+      vim.b[input_bufnr].cursor_saved_completeopt = nil
+    end
+  end
+
+  apply_completeopt()
+
+  vim.api.nvim_create_autocmd('InsertEnter', {
+    buffer = input_bufnr,
+    callback = apply_completeopt,
+  })
+  vim.api.nvim_create_autocmd('InsertLeave', {
+    buffer = input_bufnr,
+    callback = restore_completeopt,
+  })
+  vim.api.nvim_create_autocmd({ 'BufWipeout', 'BufDelete' }, {
+    buffer = input_bufnr,
+    callback = restore_completeopt,
+  })
+  local input_win = window_manager.input_winid
+  if input_win and vim.api.nvim_win_is_valid(input_win) then
+    vim.api.nvim_create_autocmd('WinClosed', {
+      pattern = tostring(input_win),
+      once = true,
+      callback = restore_completeopt,
+    })
+  end
+
+  local slash_complete_pending = false
+  vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChangedP' }, {
+    buffer = input_bufnr,
+    callback = function()
+      if slash_complete_pending then
+        return
+      end
+      slash_complete_pending = true
+      vim.schedule(function()
+        slash_complete_pending = false
+        if not vim.api.nvim_buf_is_valid(input_bufnr) then
+          return
+        end
+        if vim.api.nvim_get_current_buf() ~= input_bufnr then
+          return
+        end
+        require('cursor.slash').try_complete()
+      end)
+    end,
+  })
+
+  vim.keymap.set('i', '<Tab>', function()
+    if vim.fn.pumvisible() == 1 then
+      return '<C-n>'
+    end
+    local col = vim.fn.col('.')
+    local line = vim.api.nvim_get_current_line()
+    local before = line:sub(1, col - 1)
+    if before:match('^%s*/') then
+      return '<C-x><C-u>'
+    end
+    return '<Tab>'
+  end, {
+    buffer = input_bufnr,
+    expr = true,
+    silent = true,
+    desc = 'cursor chat: complete slash command',
+  })
+
+  vim.keymap.set('i', '<S-Tab>', function()
+    if vim.fn.pumvisible() == 1 then
+      return '<C-p>'
+    end
+    return '<S-Tab>'
+  end, {
+    buffer = input_bufnr,
+    expr = true,
+    silent = true,
+    desc = 'cursor chat: previous slash completion',
+  })
+
   vim.keymap.set('i', '<CR>', function()
+    if vim.fn.pumvisible() == 1 then
+      local word = require('cursor.slash').selected_word()
+      local typed = window_manager:get_user_input()
+      local already = word and (typed == word or typed:sub(-#word) == word)
+      if not already then
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
+        return
+      end
+    end
+
     local message = window_manager:get_user_input()
-    
+
     if message ~= '' and not message:match('^%s*$') then
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
       vim.schedule(function()
@@ -158,11 +275,11 @@ function BindingManager:register_chat_bindings(window_manager)
       end)
       return
     end
-    
+
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'n', false)
   end, {
     buffer = input_bufnr,
-    desc = "cursor chat: send message or newline",
+    desc = "cursor chat: accept slash command or send",
     silent = true,
     noremap = true,
   })
