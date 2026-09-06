@@ -22,9 +22,18 @@ function BindingManager.new(app_manager)
       revert = "r",
       close = "q",
     },
+    review = {
+      accept = "a",
+      reject = "r",
+      accept_all = "A",
+      reject_all = "R",
+      diff = "d",
+      close = "q",
+    },
   }
   self.bindings = {}
   self.enabled = true
+  self._review_saved_maps = {}
   return self
 end
 
@@ -41,6 +50,7 @@ function BindingManager:setup(opts)
   self.bindings = {
     chat = vim.tbl_extend("force", self.default_bindings.chat, opts.chat or {}),
     diff = vim.tbl_extend("force", self.default_bindings.diff, opts.diff or {}),
+    review = vim.tbl_extend("force", self.default_bindings.review, opts.review or {}),
   }
 end
 
@@ -336,6 +346,124 @@ function BindingManager:register_chat_bindings(window_manager)
       noremap = true,
     })
   end
+end
+
+function BindingManager:_review_lhs_list()
+  local keys = {}
+  local seen = {}
+  for _, lhs in pairs(self.bindings.review or {}) do
+    if type(lhs) == 'string' and lhs ~= '' and not seen[lhs] then
+      seen[lhs] = true
+      table.insert(keys, lhs)
+    end
+  end
+  return keys
+end
+
+function BindingManager:_snapshot_buf_map(bufnr, lhs)
+  local want = vim.fn.keytrans(lhs)
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, 'n')) do
+    if map.lhs == lhs or vim.fn.keytrans(map.lhs or '') == want then
+      return map
+    end
+  end
+  return nil
+end
+
+function BindingManager:_restore_buf_map(bufnr, lhs, saved)
+  if type(saved) ~= 'table' then
+    return
+  end
+  local opts = {
+    buffer = bufnr,
+    silent = saved.silent == 1,
+    noremap = saved.noremap == 1,
+    nowait = saved.nowait == 1,
+    expr = saved.expr == 1,
+    desc = saved.desc,
+  }
+  if saved.callback then
+    vim.keymap.set('n', lhs, saved.callback, opts)
+  elseif type(saved.rhs) == 'string' and saved.rhs ~= '' then
+    vim.keymap.set('n', lhs, saved.rhs, opts)
+  end
+end
+
+function BindingManager:register_review_bindings(bufnr)
+  if not self.enabled or not self.bindings.review or not bufnr then
+    return
+  end
+  if vim.b[bufnr].cursor_review_active then
+    return
+  end
+
+  local saved = {}
+  for _, lhs in ipairs(self:_review_lhs_list()) do
+    saved[lhs] = self:_snapshot_buf_map(bufnr, lhs)
+  end
+  self._review_saved_maps[bufnr] = saved
+
+  local app_mgr = self.app_manager
+  local function if_review(fn)
+    return function()
+      if not app_mgr:_cursor_qf_is_current() then
+        return
+      end
+      fn()
+    end
+  end
+  local maps = {
+    accept = if_review(function()
+      app_mgr:accept_change()
+    end),
+    reject = if_review(function()
+      app_mgr:reject_change()
+    end),
+    accept_all = if_review(function()
+      app_mgr:accept_all_changes()
+    end),
+    reject_all = if_review(function()
+      app_mgr:reject_all_changes()
+    end),
+    diff = if_review(function()
+      app_mgr:diff_change()
+    end),
+    close = function()
+      if app_mgr:_cursor_qf_is_current() then
+        vim.cmd('cclose')
+      end
+    end,
+  }
+
+  for action, fn in pairs(maps) do
+    local lhs = self.bindings.review[action]
+    if lhs then
+      vim.keymap.set('n', lhs, fn, {
+        buffer = bufnr,
+        desc = 'cursor review: ' .. action,
+        silent = true,
+        noremap = true,
+        nowait = true,
+      })
+    end
+  end
+  vim.b[bufnr].cursor_review_active = true
+end
+
+function BindingManager:unregister_review_bindings(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  if not vim.b[bufnr].cursor_review_active then
+    return
+  end
+  local saved = self._review_saved_maps[bufnr] or {}
+  for _, lhs in ipairs(self:_review_lhs_list()) do
+    pcall(vim.keymap.del, 'n', lhs, { buffer = bufnr })
+    self:_restore_buf_map(bufnr, lhs, saved[lhs])
+  end
+  self._review_saved_maps[bufnr] = nil
+  vim.b[bufnr].cursor_review_active = false
 end
 
 function BindingManager:register_diff_bindings(bufnr)
