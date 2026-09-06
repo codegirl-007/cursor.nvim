@@ -72,6 +72,7 @@ function AppManager:_default_session_data()
   return {
     current_session_id = nil,
     sessions = {},
+    model = nil,
   }
 end
 
@@ -293,10 +294,80 @@ function AppManager:_persist_current_session()
   self:_save_session_store()
 end
 
+function AppManager:get_effective_model()
+  self:_ensure_session_store()
+  if self.session_store and type(self.session_store.model) == 'string' and self.session_store.model ~= '' then
+    return self.session_store.model
+  end
+  if self.cursor_manager then
+    return self.cursor_manager:get_model()
+  end
+  return self.opts.model or 'auto'
+end
+
+function AppManager:set_model(model_id)
+  if not model_id or model_id == '' then
+    return
+  end
+  if model_id == self:get_effective_model() then
+    return
+  end
+  -- Hold the queue across the model change so stop/cancel cannot start
+  -- the next request on the old process, and so a late completion
+  -- callback cannot drain the queue before the new model is ready.
+  self._hold_queue = true
+  if self.request_in_flight then
+    local stopped = self:stop_request({ process_next = false })
+    if not stopped then
+      self.request_in_flight = false
+      self.current_request = nil
+      self:_finalize_checkpoint()
+    end
+  end
+  self:_ensure_session_store()
+  self.session_store.model = model_id
+  self:_save_session_store()
+  local function done()
+    self._hold_queue = false
+    self:_sync_queue_display(false)
+    vim.notify('Cursor model: ' .. model_id, vim.log.levels.INFO)
+    self:_process_next_request()
+  end
+  if self.cursor_manager then
+    self.cursor_manager:set_model(model_id, function()
+      done()
+    end)
+  else
+    done()
+  end
+end
+
+function AppManager:pick_model()
+  local items = CursorManager.list_models()
+  if #items == 0 then
+    vim.notify('Could not list models. Is `agent` on PATH?', vim.log.levels.ERROR)
+    return
+  end
+  local current = self:get_effective_model()
+  vim.ui.select(items, {
+    prompt = 'Cursor model (current: ' .. current .. ')',
+    format_item = function(item)
+      if item.id == current then
+        return item.name .. '  [' .. item.id .. ']  (current)'
+      end
+      return item.name .. '  [' .. item.id .. ']'
+    end,
+  }, function(choice)
+    if choice then
+      self:set_model(choice.id)
+    end
+  end)
+end
+
 function AppManager:_sync_queue_display(update_window)
   local session = self:_get_current_session()
   self.window_manager:set_panel_state({
-    model = self.opts.model or 'auto',
+    model = self:get_effective_model(),
     session_name = session and session.name or nil,
     affected_files = self.chat_manager:get_affected_files(),
     current_request = self.current_request,
@@ -711,7 +782,8 @@ function AppManager:open_chat()
   end
   
   if not self.cursor_manager then
-    self.cursor_manager = CursorManager.new(self.opts)
+    local opts = vim.tbl_extend('force', {}, self.opts or {}, { model = self:get_effective_model() })
+    self.cursor_manager = CursorManager.new(opts)
   end
 
   self.cursor_manager:set_permission_request_handler(function(content)
@@ -940,7 +1012,7 @@ end
 
 
 function AppManager:_process_next_request()
-  if self.request_in_flight then
+  if self._hold_queue or self.request_in_flight then
     return
   end
 
@@ -1020,7 +1092,10 @@ function AppManager:send_message(message_or_item)
 end
 
 
-function AppManager:stop_request()
+function AppManager:stop_request(opts)
+  opts = opts or {}
+  local process_next = opts.process_next ~= false
+
   if self.cursor_manager then
     local stopped = self.cursor_manager:stop()
     if stopped then
@@ -1042,7 +1117,9 @@ function AppManager:stop_request()
       
       self.window_manager:focus_input()
       self:_sync_queue_display(true)
-      self:_process_next_request()
+      if process_next then
+        self:_process_next_request()
+      end
     end
     return stopped
   end
