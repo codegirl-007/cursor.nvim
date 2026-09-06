@@ -33,6 +33,7 @@ function AppManager.new()
   self.next_checkpoint_id = 1
   self.current_checkpoint = nil
   self.checkpoints = {}
+  self.review_by_session = {}
   self.review = {}
   
   return self
@@ -574,7 +575,18 @@ function AppManager:revert_last_checkpoint()
   else
     self.chat_manager:add_message('assistant', 'Reverted checkpoint for: ' .. (cp.user_message or 'previous request'))
   end
-  self.review = {}
+  local reverted = {}
+  for _, path in ipairs(cp.order or {}) do
+    reverted[path] = true
+  end
+  if type(cp.files) == 'table' then
+    for path, _ in pairs(cp.files) do
+      reverted[path] = true
+    end
+  end
+  for path in pairs(reverted) do
+    self:_reconcile_review_after_restore(path)
+  end
   self:_sync_queue_display(false)
   self:_sync_changes_quickfix(false)
   self:_persist_current_session()
@@ -583,7 +595,24 @@ function AppManager:revert_last_checkpoint()
   return true
 end
 
+function AppManager:_bind_current_review()
+  self:_ensure_session_store()
+  self.review_by_session = self.review_by_session or {}
+  local id = self.current_session_id
+  if type(id) ~= 'string' or id == '' then
+    id = '__no_session__'
+  end
+  if type(self.review_by_session[id]) ~= 'table' then
+    self.review_by_session[id] = {}
+  end
+  self.review = self.review_by_session[id]
+  return self.review
+end
+
 function AppManager:_load_current_session_into_chat()
+  -- Review is in-memory and scoped to the current chat session.
+  -- Switching sessions must not discard another session's pending set.
+  self:_bind_current_review()
   local session = self:_get_current_session()
   if not session then
     self.chat_manager:initialize()
@@ -599,6 +628,7 @@ function AppManager:_load_current_session_into_chat()
   self.checkpoints = self:_deserialize_checkpoints(session.checkpoints)
   self.chat_manager:load_state(session.state or {})
   self:_sync_queue_display(false)
+  self:_sync_changes_quickfix(false)
 end
 
 function AppManager:new_session(name)
@@ -652,6 +682,9 @@ function AppManager:delete_session(session_id)
   end
 
   self:_ensure_session_store()
+  if self.review_by_session then
+    self.review_by_session[session_id] = nil
+  end
   local kept = {}
   for _, session in ipairs(self.session_store.sessions) do
     if session.id ~= session_id then
@@ -1481,7 +1514,7 @@ function AppManager:_capture_review_baseline(path)
 end
 
 function AppManager:_mark_review_pending(paths)
-  self.review = self.review or {}
+  self:_bind_current_review()
   if type(paths) ~= 'table' then
     return
   end
@@ -1503,6 +1536,21 @@ function AppManager:_clear_review_entry(path)
   local normalized = self:_normalize_checkpoint_path(path)
   if normalized and self.review then
     self.review[normalized] = nil
+  end
+end
+
+function AppManager:_reconcile_review_after_restore(path)
+  local normalized, entry = self:_review_entry(path)
+  if not normalized or not self:_is_review_pending(normalized) then
+    return
+  end
+  local baseline = type(entry) == 'table' and entry.baseline or nil
+  if type(baseline) ~= 'table' then
+    local _, snap = self:_review_baseline(normalized)
+    baseline = snap
+  end
+  if type(baseline) == 'table' and self:_file_matches_snapshot(normalized, baseline) then
+    self:_clear_review_entry(normalized)
   end
 end
 
@@ -1846,7 +1894,7 @@ function AppManager:_sync_changes_quickfix(open)
       return
     end
     path = self:_normalize_checkpoint_path(path) or path
-    if seen[path] then
+    if seen[path] or not self:_is_review_pending(path) then
       return
     end
     seen[path] = true
@@ -1867,6 +1915,11 @@ function AppManager:_sync_changes_quickfix(open)
   end
   for _, path in ipairs(self.chat_manager:get_affected_files() or {}) do
     add(path, 1, 'changed')
+  end
+  for path, entry in pairs(self.review or {}) do
+    if (type(entry) == 'table' and entry.status == 'pending') or entry == 'pending' then
+      add(path, 1, 'changed')
+    end
   end
 
   if #items == 0 then

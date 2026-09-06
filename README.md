@@ -23,6 +23,7 @@ A Neovim plugin that connects Neovim to Cursor's agent via **ACP (Agent Client P
 - **Image Attachments**: Pasted/drag-dropped image paths are captured and sent as ACP image attachments, while preserving free-form text prompting.
 - **Cursor Changes Quickfix**: Agent writes and structured edits populate a `Cursor Changes` quickfix list (not git status).
 - **Review Keybinds**: On that list, `a`/`r` accept or reject the file under the cursor, `A`/`R` accept or reject all, `d` diffs against the checkpoint snapshot, `q` closes the list.
+- **Pending Review Queue**: The list only shows files still pending for the current chat session. Accept or reject drops that file; an empty list closes. Pending review is kept across session switches while Neovim is running, but is not restored after restart.
 - **Status Indicators**: Lightweight status line in the chat buffer showing whether the agent is idle, processing, streaming, or stopped.
 - **Project-Persistent Sessions**: Chat history is persisted per project, with support for multiple sessions and session switching.
 - **Real Session Mapping (UI <-> ACP)**: Each UI session stores its own backend ACP session binding, so switching sessions also switches backend context.
