@@ -17,6 +17,7 @@ function CursorManager.new(opts)
 
   self.model = opts.model or 'auto'
   self._config_options = nil
+  self._available_commands = {}
 
   -- JSON-RPC / ACP state
   self.proc_job_id = nil
@@ -542,14 +543,46 @@ function CursorManager:_handle_terminal_release(id, params)
   self:_send_response(id, vim.NIL)
 end
 
+function CursorManager:_set_available_commands(commands)
+  local list = {}
+  if type(commands) == 'table' then
+    for _, cmd in ipairs(commands) do
+      if type(cmd) == 'table' and type(cmd.name) == 'string' and cmd.name ~= '' then
+        local hint = nil
+        if type(cmd.input) == 'table' and type(cmd.input.hint) == 'string' then
+          hint = cmd.input.hint
+        end
+        table.insert(list, {
+          name = cmd.name,
+          description = cmd.description or '',
+          input_hint = hint,
+        })
+      end
+    end
+  end
+  self._available_commands = list
+end
+
+function CursorManager:get_available_commands()
+  return self._available_commands or {}
+end
+
 function CursorManager:_handle_session_update(update)
-  if not self._active_request or not update then
+  if not update then
+    return
+  end
+
+  local update_type = update.sessionUpdate or update.type
+  if update_type == 'available_commands_update' or update_type == 'available_commands' then
+    self:_set_available_commands(update.availableCommands or update.available_commands)
+    return
+  end
+
+  if not self._active_request then
     return
   end
 
   self:_notify_activity_update(update)
-
-  local update_type = update.sessionUpdate or update.type
   if update_type ~= 'agent_message_chunk' then
     return
   end
@@ -1528,16 +1561,23 @@ function CursorManager:send_chat_message(message, callback, opts)
     user_request = 'Please analyze the attached image(s).'
   end
 
-  local full_prompt = self:get_session_context(current_file)
-  local prompt_parts = {}
-  if full_prompt ~= '' then
-    table.insert(prompt_parts, full_prompt)
+  local slash = require('cursor.slash').parse(user_request)
+  local full_prompt
+  if slash then
+    -- ACP slash commands only match when the prompt text starts with /name.
+    full_prompt = slash.raw
+  else
+    full_prompt = self:get_session_context(current_file)
+    local prompt_parts = {}
+    if full_prompt ~= '' then
+      table.insert(prompt_parts, full_prompt)
+    end
+    if type(conversation_context) == 'string' and conversation_context ~= '' then
+      table.insert(prompt_parts, 'Conversation so far:\n' .. conversation_context)
+    end
+    table.insert(prompt_parts, 'User request: ' .. user_request)
+    full_prompt = table.concat(prompt_parts, '\n\n')
   end
-  if type(conversation_context) == 'string' and conversation_context ~= '' then
-    table.insert(prompt_parts, 'Conversation so far:\n' .. conversation_context)
-  end
-  table.insert(prompt_parts, 'User request: ' .. user_request)
-  full_prompt = table.concat(prompt_parts, '\n\n')
 
   local function finalize_request()
     if not self._active_request then

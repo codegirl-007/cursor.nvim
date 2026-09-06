@@ -3,6 +3,7 @@ local WindowManager = require('cursor.window_manager')
 local ChatManager = require('cursor.chat_manager')
 local BindingManager = require('cursor.binding_manager')
 local Commands = require('cursor.commands')
+local Slash = require('cursor.slash')
 
 local AppManager = {}
 AppManager.__index = AppManager
@@ -827,6 +828,121 @@ function AppManager:open_chat()
   self.window_manager:update_chat_display(self.chat_manager)
 end
 
+
+function AppManager:_run_local_slash(cmd, args)
+  args = type(args) == 'string' and args:gsub('^%s+', ''):gsub('%s+$', '') or ''
+  local name = cmd and cmd.name or ''
+
+  if name == 'quit' then
+    self:close()
+    return 'closed'
+  end
+
+  if name == 'model' then
+    if args == '' then
+      self:pick_model()
+      return 'ui'
+    end
+    self:set_model(args:match('^(%S+)') or args)
+    return 'done'
+  end
+
+  if name == 'clear' then
+    self:new_session(args ~= '' and args or nil)
+    vim.notify('Started a new Cursor session', vim.log.levels.INFO)
+    return 'done'
+  end
+
+  if name == 'resume' then
+    self:manage_sessions()
+    return 'ui'
+  end
+
+  if name == 'rewind' then
+    self:revert_last_checkpoint()
+    return 'done'
+  end
+
+  if name == 'rename' then
+    if args == '' then
+      vim.ui.input({ prompt = 'Session name: ' }, function(input)
+        if input and input:match('%S') then
+          self:rename_session(self.current_session_id, input)
+        end
+      end)
+      return 'ui'
+    end
+    self:rename_session(self.current_session_id, args)
+    return 'done'
+  end
+
+  if name == 'help' then
+    self:pick_slash_command(args)
+    return 'ui'
+  end
+
+  return 'done'
+end
+
+function AppManager:pick_slash_command(filter)
+  local items = Slash.list(self)
+  if type(filter) == 'string' and filter ~= '' then
+    local needle = filter:gsub('^/', ''):lower()
+    local matches = {}
+    for _, item in ipairs(items) do
+      if item.name:lower() == needle or item.name:lower():sub(1, #needle) == needle then
+        table.insert(matches, item)
+      end
+    end
+    if #matches == 0 then
+      vim.notify('No slash command matching /' .. needle, vim.log.levels.INFO)
+      return
+    end
+    if #matches == 1 then
+      vim.notify('/' .. matches[1].name .. ' — ' .. (matches[1].description or ''), vim.log.levels.INFO)
+      return
+    end
+    items = matches
+  end
+
+  if #items == 0 then
+    vim.notify('No slash commands available yet.', vim.log.levels.INFO)
+    return
+  end
+
+  vim.ui.select(items, {
+    prompt = 'Slash command',
+    format_item = function(item)
+      local tag = item.local_cmd and 'local' or 'agent'
+      local desc = item.description or ''
+      if desc ~= '' then
+        return '/' .. item.name .. '  ' .. desc .. '  (' .. tag .. ')'
+      end
+      return '/' .. item.name .. '  (' .. tag .. ')'
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+    if choice.local_cmd and not choice.takes_arg then
+      local resolved = Slash.resolve_local(choice.name) or choice
+      local result = self:_run_local_slash(resolved, '')
+      if result == 'done' then
+        vim.schedule(function()
+          self.window_manager:focus_input()
+        end)
+      end
+      return
+    end
+    local text = '/' .. choice.name
+    if choice.takes_arg or choice.input_hint then
+      text = text .. ' '
+    end
+    self.window_manager:set_input_text(text)
+    self.window_manager:focus_input(true)
+  end)
+end
+
 function AppManager:handle_send_message(message_text)
   if not self.window_manager.chat_bufnr then
     return
@@ -836,6 +952,22 @@ function AppManager:handle_send_message(message_text)
   if not message or message == '' or message:match('^%s*$') then
     return
   end
+
+  local slash = Slash.parse(message)
+  if slash then
+    local local_cmd = Slash.resolve_local(slash.name)
+    if local_cmd then
+      self.window_manager:clear_input()
+      local result = self:_run_local_slash(local_cmd, slash.args)
+      if result == 'done' then
+        vim.schedule(function()
+          self.window_manager:focus_input()
+        end)
+      end
+      return
+    end
+  end
+
   local checkpoint_before = self.chat_manager:get_state()
   local checkpoint = self:_create_checkpoint(message, checkpoint_before)
   local seed_paths = {}
