@@ -581,12 +581,7 @@ function AppManager:_reload_file_buffers(path, lines)
   end
 
   for _, bufnr in ipairs(bufs) do
-    if self:_apply_buffer_lines(bufnr, lines, { skip_modified = true, modified = false }) then
-      pcall(vim.api.nvim_exec_autocmds, 'BufWritePost', {
-        buffer = bufnr,
-        modeline = false,
-      })
-    end
+    self:_apply_buffer_lines(bufnr, lines, { skip_modified = true, modified = false })
   end
 end
 
@@ -1770,19 +1765,20 @@ function AppManager:_clear_review_entry(path)
   if normalized and self.review then
     self.review[normalized] = nil
   end
-  if normalized and self._buffer_before then
-    self._buffer_before[normalized] = nil
-  end
 end
 
 function AppManager:_capture_buffer_before(path)
+  self:_bind_current_review()
   local normalized = self:_normalize_checkpoint_path(path)
   if not normalized then
     return
   end
-  self._buffer_before = self._buffer_before or {}
-  self._buffer_before[normalized] = self._buffer_before[normalized] or {}
-  local store = self._buffer_before[normalized]
+  local entry = (self.review or {})[normalized]
+  if type(entry) ~= 'table' or entry.status ~= 'pending' then
+    return
+  end
+  entry.buffer_before = entry.buffer_before or {}
+  local store = entry.buffer_before
   self:_each_file_buffer(normalized, function(bufnr)
     if store[bufnr] then
       return
@@ -1793,12 +1789,22 @@ function AppManager:_capture_buffer_before(path)
     store[bufnr] = {
       lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
       modified = vim.bo[bufnr].modified,
+      changedtick = vim.api.nvim_buf_get_changedtick(bufnr),
     }
   end)
-  local entry = (self.review or {})[normalized]
-  if type(entry) == 'table' then
-    entry.buffer_before = store
+end
+
+function AppManager:_buffer_snapshot_is_current(bufnr, snap)
+  if type(snap) ~= 'table' or type(bufnr) ~= 'number' then
+    return false
   end
+  if not vim.api.nvim_buf_is_valid(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return false
+  end
+  if type(snap.changedtick) ~= 'number' then
+    return false
+  end
+  return vim.api.nvim_buf_get_changedtick(bufnr) == snap.changedtick
 end
 
 function AppManager:_restore_buffers_from_before(path, buffer_before)
@@ -1806,14 +1812,15 @@ function AppManager:_restore_buffers_from_before(path, buffer_before)
     for key, snap in pairs(buffer_before) do
       local bufnr = tonumber(key) or key
       if type(bufnr) == 'number' and vim.api.nvim_buf_is_valid(bufnr) and type(snap) == 'table' then
-        self:_apply_buffer_lines(bufnr, snap.lines or { '' }, {
-          modified = snap.modified and true or false,
-        })
+        if self:_buffer_snapshot_is_current(bufnr, snap) then
+          self:_apply_buffer_lines(bufnr, snap.lines or { '' }, {
+            modified = snap.modified and true or false,
+          })
+        end
       end
     end
-    return
   end
-  -- No pre-agent buffer snapshot: only refresh clean buffers from disk.
+  -- Newer user edits keep their modified buffers. Clean buffers follow disk.
   self:_reload_file_buffers(path)
 end
 
