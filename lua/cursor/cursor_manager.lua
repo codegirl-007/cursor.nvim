@@ -95,6 +95,7 @@ function CursorManager:_ensure_acp_process()
       self.current_prompt_id = nil
       self.pending = {}
       self._active_request = nil
+      self._available_commands = {}
     end,
   })
 
@@ -292,34 +293,29 @@ function CursorManager:_handle_fs_write_text_file(id, params)
     return
   end
 
-  local on_file_write = self.on_file_write
-  if type(on_file_write) == 'function' then
-    pcall(on_file_write, path)
+  local write_path = vim.fn.fnamemodify(tostring(path):gsub('^file://', ''), ':p')
+  write_path = vim.fn.resolve(write_path)
+
+  -- Snapshot the on-disk file before replacing it.
+  if type(self.on_file_write) == 'function' then
+    pcall(self.on_file_write, write_path)
   end
 
-  local lines = {}
-  for line in tostring(content):gmatch('[^\r\n]+') do
-    table.insert(lines, line)
-  end
-  if #lines == 0 then
-    lines = { '' }
-  end
-
-  pcall(function()
-    vim.fn.writefile(lines, path)
-  end)
-
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) then
-      local buf_path = vim.api.nvim_buf_get_name(bufnr)
-      if buf_path == path then
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-        break
-      end
+  vim.schedule(function()
+    local lines = vim.split(tostring(content), '\n', { plain = true })
+    if #lines > 0 and lines[#lines] == '' then
+      table.remove(lines)
     end
-  end
+    if #lines == 0 then
+      lines = { '' }
+    end
 
-  self:_send_response(id, vim.NIL)
+    pcall(vim.fn.writefile, lines, write_path)
+    self:_send_response(id, vim.NIL)
+    if type(self.on_file_written) == 'function' then
+      pcall(self.on_file_written, write_path, lines)
+    end
+  end)
 end
 
 function CursorManager:_handle_terminal_create(id, params)
@@ -1292,6 +1288,14 @@ function CursorManager:set_file_write_handler(handler)
   end
 end
 
+function CursorManager:set_file_written_handler(handler)
+  if type(handler) == 'function' then
+    self.on_file_written = handler
+  else
+    self.on_file_written = nil
+  end
+end
+
 function CursorManager:set_file_read_handler(handler)
   if type(handler) == 'function' then
     self.on_file_read = handler
@@ -1518,6 +1522,11 @@ function CursorManager:_ensure_session(current_file, cb)
         self.session_id = result.sessionId
         if type(result.configOptions) == 'table' then
           self._config_options = result.configOptions
+        end
+        if type(result.availableCommands) == 'table' then
+          self:_set_available_commands(result.availableCommands)
+        elseif type(result.available_commands) == 'table' then
+          self:_set_available_commands(result.available_commands)
         end
         done(true)
       else
@@ -1988,6 +1997,7 @@ function CursorManager:set_model(model_id, cb)
     self.authenticated = false
     self.session_id = nil
     self._config_options = nil
+    self._available_commands = {}
     self.model = model_id
     cb(true, 'restart')
   end

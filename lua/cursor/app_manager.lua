@@ -401,8 +401,132 @@ function AppManager:_write_file_raw(path, content)
   return true
 end
 
+function AppManager:_inode_key(path)
+  if type(path) ~= 'string' or path == '' then
+    return nil
+  end
+  local fs = vim.uv or vim.loop
+  if not fs or type(fs.fs_stat) ~= 'function' then
+    return nil
+  end
+  local stat = fs.fs_stat(path)
+  if not stat or stat.ino == nil then
+    return nil
+  end
+  return tostring(stat.dev or 0) .. ':' .. tostring(stat.ino)
+end
+
+function AppManager:_is_chat_win(winid)
+  local wm = self.window_manager
+  return wm and (winid == wm.chat_winid or winid == wm.input_winid or winid == wm.queue_winid)
+end
+
+function AppManager:_find_file_buffers(path)
+  local found = {}
+  local seen = {}
+  local function add(bufnr)
+    if type(bufnr) == 'number' and bufnr > 0 and vim.api.nvim_buf_is_valid(bufnr) and not seen[bufnr] then
+      seen[bufnr] = true
+      table.insert(found, bufnr)
+    end
+  end
+
+  local variants = {}
+  local seen_paths = {}
+  local function add_variant(p)
+    if type(p) ~= 'string' or p == '' or seen_paths[p] then
+      return
+    end
+    seen_paths[p] = true
+    table.insert(variants, p)
+    local abs = vim.fn.fnamemodify(p:gsub('^file://', ''), ':p')
+    if abs ~= '' and not seen_paths[abs] then
+      seen_paths[abs] = true
+      table.insert(variants, abs)
+    end
+    local resolved = vim.fn.resolve(abs ~= '' and abs or p)
+    if resolved ~= '' and not seen_paths[resolved] then
+      seen_paths[resolved] = true
+      table.insert(variants, resolved)
+    end
+  end
+
+  add_variant(path)
+  add_variant(self:_normalize_checkpoint_path(path))
+
+  local target_inode = nil
+  for _, p in ipairs(variants) do
+    target_inode = target_inode or self:_inode_key(p)
+    add(vim.fn.bufnr(p))
+  end
+
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(bufnr)
+    if name ~= '' then
+      local buf_norm = self:_normalize_checkpoint_path(name)
+      local buf_res = buf_norm and vim.fn.resolve(buf_norm) or vim.fn.resolve(name)
+      local buf_inode = self:_inode_key(buf_res) or self:_inode_key(name)
+      if target_inode and buf_inode and buf_inode == target_inode then
+        add(bufnr)
+      else
+        for _, p in ipairs(variants) do
+          if name == p or buf_norm == p or buf_res == p or buf_res == vim.fn.resolve(p) then
+            add(bufnr)
+            break
+          end
+        end
+      end
+    end
+  end
+
+  if #found == 0 then
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.api.nvim_win_is_valid(win) and not self:_is_chat_win(win) then
+        local cfg = vim.api.nvim_win_get_config(win)
+        if cfg.relative == nil or cfg.relative == '' then
+          local bufnr = vim.api.nvim_win_get_buf(win)
+          local name = vim.api.nvim_buf_get_name(bufnr)
+          if name ~= '' and vim.bo[bufnr].buftype == '' then
+            local buf_inode = self:_inode_key(name) or self:_inode_key(vim.fn.resolve(name))
+            if target_inode and buf_inode and buf_inode == target_inode then
+              add(bufnr)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return found
+end
+
+function AppManager:_each_file_buffer(path, callback)
+  if type(callback) ~= 'function' then
+    return
+  end
+  local normalized = self:_normalize_checkpoint_path(path)
+  for _, bufnr in ipairs(self:_find_file_buffers(path)) do
+    callback(bufnr, normalized)
+  end
+end
+
+function AppManager:_apply_buffer_lines(bufnr, lines)
+  if not vim.api.nvim_buf_is_loaded(bufnr) then
+    pcall(vim.fn.bufload, bufnr)
+  end
+  if not vim.api.nvim_buf_is_loaded(bufnr) or vim.bo[bufnr].buftype ~= '' then
+    return false
+  end
+  vim.bo[bufnr].modifiable = true
+  local undolevels = vim.bo[bufnr].undolevels
+  vim.bo[bufnr].undolevels = -1
+  local ok = pcall(vim.api.nvim_buf_set_lines, bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].undolevels = undolevels
+  vim.bo[bufnr].modified = false
+  return ok
+end
+
 function AppManager:_set_loaded_buffer_content(path, content)
-  local normalized_path = self:_normalize_checkpoint_path(path)
   local lines = {}
   if content and content ~= '' then
     lines = vim.split(content, '\n', { plain = true })
@@ -410,13 +534,99 @@ function AppManager:_set_loaded_buffer_content(path, content)
       table.remove(lines, #lines)
     end
   end
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].buftype == ''
-        and vim.api.nvim_buf_get_name(bufnr) == normalized_path
-        and not vim.bo[bufnr].modified then
-      vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
-      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-      vim.api.nvim_buf_set_option(bufnr, 'modified', false)
+  self:_each_file_buffer(path, function(bufnr)
+    self:_apply_buffer_lines(bufnr, lines)
+  end)
+end
+
+function AppManager:_reload_file_buffers(path, lines)
+  if type(lines) ~= 'table' then
+    local normalized = self:_normalize_checkpoint_path(path)
+    local content = ''
+    if normalized and vim.fn.filereadable(normalized) == 1 then
+      content = self:_read_file_raw(normalized) or ''
+    end
+    lines = {}
+    if content ~= '' then
+      lines = vim.split(content, '\n', { plain = true })
+      if #lines > 0 and lines[#lines] == '' then
+        table.remove(lines, #lines)
+      end
+    end
+    if #lines == 0 then
+      lines = { '' }
+    end
+  end
+
+  local bufs = self:_find_file_buffers(path)
+  if #bufs == 0 then
+    local target = self:_inode_key(path) or self:_inode_key(self:_normalize_checkpoint_path(path) or '')
+    local resolved = vim.fn.resolve(self:_normalize_checkpoint_path(path) or path or '')
+    for _, bufnr in ipairs(self:_visible_file_buffers()) do
+      local name = vim.api.nvim_buf_get_name(bufnr)
+      local buf_res = vim.fn.resolve(name)
+      local buf_inode = self:_inode_key(name) or self:_inode_key(buf_res)
+      if (target and buf_inode and buf_inode == target) or (resolved ~= '' and buf_res == resolved) then
+        table.insert(bufs, bufnr)
+      end
+    end
+  end
+
+  for _, bufnr in ipairs(bufs) do
+    if self:_apply_buffer_lines(bufnr, lines) then
+      pcall(vim.api.nvim_exec_autocmds, 'BufWritePost', {
+        buffer = bufnr,
+        modeline = false,
+      })
+    end
+  end
+end
+
+function AppManager:_visible_file_buffers()
+  local bufs = {}
+  local seen = {}
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_win_is_valid(win) and not self:_is_chat_win(win) then
+      local cfg = vim.api.nvim_win_get_config(win)
+      if cfg.relative == nil or cfg.relative == '' then
+        local bufnr = vim.api.nvim_win_get_buf(win)
+        if not seen[bufnr] and vim.bo[bufnr].buftype == '' and vim.api.nvim_buf_get_name(bufnr) ~= '' then
+          seen[bufnr] = true
+          table.insert(bufs, bufnr)
+        end
+      end
+    end
+  end
+  return bufs
+end
+
+function AppManager:_refresh_changed_buffers()
+  local seen = {}
+  local function consider(path)
+    local normalized = self:_normalize_checkpoint_path(path)
+    if not normalized or seen[normalized] then
+      return
+    end
+    seen[normalized] = true
+    self:_reload_file_buffers(normalized)
+  end
+
+  for _, path in ipairs(self:_review_paths()) do
+    consider(path)
+  end
+  for _, path in ipairs(self.chat_manager:get_affected_files() or {}) do
+    consider(path)
+  end
+  for _, change in ipairs(self.chat_manager:get_last_changes() or {}) do
+    if type(change) == 'table' then
+      consider(change.file)
+    end
+  end
+
+  for _, bufnr in ipairs(self:_visible_file_buffers()) do
+    if not vim.bo[bufnr].modified then
+      vim.bo[bufnr].autoread = true
+      pcall(vim.cmd, 'checktime ' .. tostring(bufnr))
     end
   end
 end
@@ -854,8 +1064,18 @@ function AppManager:open_chat()
       self:_mark_review_pending(local_paths)
     end
     self:_sync_changes_quickfix(false)
-    self:_persist_current_session()
     self:_sync_queue_display(false)
+    vim.schedule(function()
+      self:_persist_current_session()
+    end)
+  end)
+  self.cursor_manager:set_file_written_handler(function(path, lines)
+    self:_reload_file_buffers(path, lines)
+    for _, written in ipairs(self:_filter_project_local_paths({ path })) do
+      if written ~= path then
+        self:_reload_file_buffers(written, lines)
+      end
+    end
   end)
   self.cursor_manager:set_file_read_handler(function(path)
     local local_paths = self:_filter_project_local_paths({ path })
@@ -1254,6 +1474,7 @@ function AppManager:send_message(message_or_item)
         self._open_changes_qf = true
       end
       self:show_last_changes()
+      self:_refresh_changed_buffers()
 
       self:_persist_current_session()
       self.window_manager:update_chat_display(self.chat_manager)
