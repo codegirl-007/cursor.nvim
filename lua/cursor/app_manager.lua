@@ -584,6 +584,7 @@ function AppManager:revert_last_checkpoint()
 end
 
 function AppManager:_load_current_session_into_chat()
+  self.review = {}
   local session = self:_get_current_session()
   if not session then
     self.chat_manager:initialize()
@@ -599,6 +600,7 @@ function AppManager:_load_current_session_into_chat()
   self.checkpoints = self:_deserialize_checkpoints(session.checkpoints)
   self.chat_manager:load_state(session.state or {})
   self:_sync_queue_display(false)
+  self:_sync_changes_quickfix(false)
 end
 
 function AppManager:new_session(name)
@@ -1846,7 +1848,7 @@ function AppManager:_sync_changes_quickfix(open)
       return
     end
     path = self:_normalize_checkpoint_path(path) or path
-    if seen[path] then
+    if seen[path] or not self:_is_review_pending(path) then
       return
     end
     seen[path] = true
