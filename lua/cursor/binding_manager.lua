@@ -155,12 +155,32 @@ function BindingManager:register_chat_bindings(window_manager)
     end)
   end)
 
+  -- Keep the previous completeopt in a closure so we can restore it if
+  -- the input buffer is wiped while still in insert (InsertLeave may
+  -- not run, and vim.b is already gone).
+  local saved_completeopt = nil
+
   local function apply_completeopt()
-    if vim.b[input_bufnr].cursor_saved_completeopt == nil then
-      vim.b[input_bufnr].cursor_saved_completeopt = vim.o.completeopt
+    if saved_completeopt == nil then
+      saved_completeopt = vim.o.completeopt
+    end
+    if vim.api.nvim_buf_is_valid(input_bufnr) then
+      vim.b[input_bufnr].cursor_saved_completeopt = saved_completeopt
     end
     vim.o.completeopt = 'menu,menuone,noinsert'
   end
+
+  local function restore_completeopt()
+    if saved_completeopt == nil then
+      return
+    end
+    vim.o.completeopt = saved_completeopt
+    saved_completeopt = nil
+    if vim.api.nvim_buf_is_valid(input_bufnr) then
+      vim.b[input_bufnr].cursor_saved_completeopt = nil
+    end
+  end
+
   apply_completeopt()
 
   vim.api.nvim_create_autocmd('InsertEnter', {
@@ -169,14 +189,20 @@ function BindingManager:register_chat_bindings(window_manager)
   })
   vim.api.nvim_create_autocmd('InsertLeave', {
     buffer = input_bufnr,
-    callback = function()
-      local saved = vim.b[input_bufnr].cursor_saved_completeopt
-      if saved then
-        vim.o.completeopt = saved
-        vim.b[input_bufnr].cursor_saved_completeopt = nil
-      end
-    end,
+    callback = restore_completeopt,
   })
+  vim.api.nvim_create_autocmd({ 'BufWipeout', 'BufDelete' }, {
+    buffer = input_bufnr,
+    callback = restore_completeopt,
+  })
+  local input_win = window_manager.input_winid
+  if input_win and vim.api.nvim_win_is_valid(input_win) then
+    vim.api.nvim_create_autocmd('WinClosed', {
+      pattern = tostring(input_win),
+      once = true,
+      callback = restore_completeopt,
+    })
+  end
 
   local slash_complete_pending = false
   vim.api.nvim_create_autocmd({ 'TextChangedI', 'TextChangedP' }, {
