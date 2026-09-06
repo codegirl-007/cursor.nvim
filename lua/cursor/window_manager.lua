@@ -34,7 +34,6 @@ function WindowManager.new()
   self.panel_state = {
     model = 'auto',
     session_name = nil,
-    affected_files = {},
     current_request = nil,
     request_queue = {},
   }
@@ -42,6 +41,12 @@ function WindowManager.new()
   return self
 end
 
+function WindowManager:_ui_opt(key, fallback)
+  if self.opts and self.opts.ui and self.opts.ui[key] ~= nil then
+    return self.opts.ui[key]
+  end
+  return fallback
+end
 
 function WindowManager:_is_owned_chat_buf(buf)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then
@@ -141,11 +146,35 @@ function WindowManager:_highlight_roles(buf, roles)
   end
 end
 
-function WindowManager:_ui_opt(key, fallback)
-  if self.opts and self.opts.ui and self.opts.ui[key] ~= nil then
-    return self.opts.ui[key]
+function WindowManager:_winbar(text)
+  if not text or text == '' then
+    return ''
   end
-  return fallback
+  return '%#Title# ' .. text .. ' %*'
+end
+
+function WindowManager:_setup_split_win(winid, opts)
+  opts = opts or {}
+  if not (winid and vim.api.nvim_win_is_valid(winid)) then
+    return
+  end
+  vim.wo[winid].number = false
+  vim.wo[winid].relativenumber = false
+  vim.wo[winid].wrap = true
+  vim.wo[winid].linebreak = true
+  vim.wo[winid].cursorline = false
+  vim.wo[winid].signcolumn = 'no'
+  vim.wo[winid].foldcolumn = '0'
+  vim.wo[winid].winfixwidth = true
+  if opts.fix_height then
+    vim.wo[winid].winfixheight = true
+  end
+  if opts.winbar ~= nil then
+    vim.wo[winid].winbar = opts.winbar
+  end
+  if opts.statusline ~= nil then
+    vim.wo[winid].statusline = opts.statusline
+  end
 end
 
 function WindowManager:create_chat_window()
@@ -155,96 +184,53 @@ function WindowManager:create_chat_window()
   if self.opts and self.opts.chat_width then
     chat_width = self.opts.chat_width
   end
-  
-  local ui = vim.api.nvim_list_uis()[1]
-  local width = ui.width
-  local height = ui.height
+
   local queue_height = self:_ui_opt('queue_height', 4)
-  local section_gap = self:_ui_opt('section_gap', 2)
-  
+  local input_height = self:_ui_opt('input_height', 3)
+  self.layout = {
+    width = chat_width,
+    col = 0,
+    history_height = 0,
+    base_row = 0,
+    input_height = input_height,
+    queue_height = queue_height,
+    section_gap = self:_ui_opt('section_gap', 2),
+  }
+
   self.chat_bufnr = self:_create_panel_buf('cursor-chat-history', true)
   self.input_bufnr = self:_create_panel_buf('cursor-chat-input', false)
   self.queue_bufnr = self:_create_panel_buf('cursor-chat-queue', true)
-  
-  local input_height = self:_ui_opt('input_height', 3)
-  local history_height = height - input_height - queue_height - 6
-  if history_height < 6 then
-    history_height = 6
-  end
-  local col = width - chat_width - 1
-  local base_row = history_height + 2
-  self.layout = {
-    width = chat_width,
-    col = col,
-    history_height = history_height,
-    base_row = base_row,
-    input_height = input_height,
-    queue_height = queue_height,
-    section_gap = section_gap,
-  }
-  
-  self.chat_winid = vim.api.nvim_open_win(self.chat_bufnr, true, {
-    relative = 'editor',
-    width = chat_width,
-    height = history_height,
-    col = col,
-    row = 1,
-    style = 'minimal',
-    border = 'single',
-    title = self:_ui_opt('show_chat_title', true) and ' Chat ' or '',
-    title_pos = 'center',
-  })
-  
-  vim.api.nvim_win_set_option(self.chat_winid, 'number', false)
-  vim.api.nvim_win_set_option(self.chat_winid, 'relativenumber', false)
-  vim.api.nvim_win_set_option(self.chat_winid, 'wrap', true)
-  vim.api.nvim_win_set_option(self.chat_winid, 'cursorline', false)
-  vim.api.nvim_win_set_option(self.chat_winid, 'signcolumn', 'no')
-  vim.api.nvim_win_set_option(self.chat_winid, 'foldcolumn', '0')
-  
-  self.input_winid = vim.api.nvim_open_win(self.input_bufnr, true, {
-    relative = 'editor',
-    width = chat_width,
-    height = input_height,
-    col = col,
-    row = base_row + queue_height + section_gap,
-    style = 'minimal',
-    border = 'single',
-    title = self:_ui_opt('show_input_title', true) and ' Input ' or '',
-    title_pos = 'center',
+
+  vim.cmd('silent keepalt botright ' .. tostring(chat_width) .. 'vsplit')
+  self.chat_winid = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(self.chat_winid, self.chat_bufnr)
+  self:_setup_split_win(self.chat_winid, {
+    winbar = self:_ui_opt('show_chat_title', true) and self:_winbar('Chat') or '',
+    statusline = ' ',
   })
 
-  self.queue_winid = vim.api.nvim_open_win(self.queue_bufnr, false, {
-    relative = 'editor',
-    width = chat_width,
-    height = queue_height,
-    col = col,
-    row = base_row,
-    style = 'minimal',
-    border = 'single',
-    title = self:_ui_opt('show_queue_title', true) and ' Queue ' or '',
-    title_pos = 'center',
+  local opened
+  opened, self.input_winid = pcall(vim.api.nvim_open_win, self.input_bufnr, true, {
+    split = 'below',
+    win = self.chat_winid,
+    height = input_height,
   })
-  
-  vim.api.nvim_win_set_option(self.input_winid, 'number', false)
-  vim.api.nvim_win_set_option(self.input_winid, 'relativenumber', false)
-  vim.api.nvim_win_set_option(self.input_winid, 'wrap', true)
-  vim.api.nvim_win_set_option(self.input_winid, 'cursorline', false)
-  vim.api.nvim_win_set_option(self.input_winid, 'signcolumn', 'no')
-  vim.api.nvim_win_set_option(self.input_winid, 'foldcolumn', '0')
-  vim.api.nvim_win_set_option(self.input_winid, 'winfixheight', true)
-  self:_setup_context_win_options(self.queue_winid)
-  
-  if self:_ui_opt('show_model_indicator', true) then
-    vim.api.nvim_win_set_option(self.input_winid, 'statusline', '%#Comment# ' .. (self.panel_state.model == 'auto' and 'Auto' or tostring(self.panel_state.model)) .. ' %*')
-  else
-    vim.api.nvim_win_set_option(self.input_winid, 'statusline', '')
+  if not opened then
+    vim.api.nvim_set_current_win(self.chat_winid)
+    vim.cmd('silent keepalt belowright ' .. tostring(input_height) .. 'split')
+    self.input_winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(self.input_winid, self.input_bufnr)
   end
-  
+  self:_setup_split_win(self.input_winid, {
+    fix_height = true,
+    winbar = self:_ui_opt('show_input_title', true) and self:_winbar('Input') or '',
+    statusline = self:_ui_opt('show_model_indicator', true) and '%#Comment# Auto %*' or ' ',
+  })
+
   vim.api.nvim_buf_set_lines(self.input_bufnr, 0, -1, false, {''})
   vim.api.nvim_win_set_cursor(self.input_winid, {1, 0})
   vim.api.nvim_feedkeys('i', 'n', false)
-  
+
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', true)
   vim.api.nvim_buf_set_lines(self.chat_bufnr, 0, -1, false, { 'Cursor Chat', '' })
   vim.api.nvim_buf_set_option(self.chat_bufnr, 'modifiable', false)
@@ -279,7 +265,6 @@ function WindowManager:set_panel_state(state)
   self.panel_state = {
     model = state.model or 'auto',
     session_name = state.session_name,
-    affected_files = state.affected_files or {},
     current_request = state.current_request,
     request_queue = state.request_queue or {},
   }
@@ -287,36 +272,39 @@ function WindowManager:set_panel_state(state)
 end
 
 function WindowManager:_setup_context_win_options(winid)
-  if not (winid and vim.api.nvim_win_is_valid(winid)) then
-    return
-  end
-  vim.api.nvim_win_set_option(winid, 'number', false)
-  vim.api.nvim_win_set_option(winid, 'relativenumber', false)
-  vim.api.nvim_win_set_option(winid, 'wrap', true)
-  vim.api.nvim_win_set_option(winid, 'cursorline', false)
-  vim.api.nvim_win_set_option(winid, 'signcolumn', 'no')
-  vim.api.nvim_win_set_option(winid, 'foldcolumn', '0')
-  vim.api.nvim_win_set_option(winid, 'winfixheight', true)
+  self:_setup_split_win(winid, { fix_height = true })
 end
 
-function WindowManager:_open_or_update_context_win(winid, bufnr, title, row, height)
-  local cfg = {
-    relative = 'editor',
-    width = self.layout.width,
-    height = height,
-    col = self.layout.col,
-    row = row,
-    style = 'minimal',
-    border = 'single',
-    title = title,
-    title_pos = 'center',
-  }
+function WindowManager:_open_or_update_context_win(winid, bufnr, title, _row, height)
   if winid and vim.api.nvim_win_is_valid(winid) then
-    vim.api.nvim_win_set_config(winid, cfg)
+    pcall(vim.api.nvim_win_set_height, winid, height)
+    vim.wo[winid].winbar = self:_winbar((title or ''):gsub('^%s+', ''):gsub('%s+$', ''))
     return winid
   end
-  local new_winid = vim.api.nvim_open_win(bufnr, false, cfg)
-  self:_setup_context_win_options(new_winid)
+  local anchor = self.input_winid
+  if not (anchor and vim.api.nvim_win_is_valid(anchor) and bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return nil
+  end
+  local opened, new_winid = pcall(vim.api.nvim_open_win, bufnr, false, {
+    split = 'above',
+    win = anchor,
+    height = height,
+  })
+  if not opened then
+    local prev = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_win(anchor)
+    vim.cmd('silent keepalt aboveleft ' .. tostring(height) .. 'split')
+    new_winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(new_winid, bufnr)
+    if vim.api.nvim_win_is_valid(prev) then
+      vim.api.nvim_set_current_win(prev)
+    end
+  end
+  self:_setup_split_win(new_winid, {
+    fix_height = true,
+    winbar = self:_winbar((title or ''):gsub('^%s+', ''):gsub('%s+$', '')),
+    statusline = ' ',
+  })
   return new_winid
 end
 
@@ -324,6 +312,7 @@ function WindowManager:update_panel_display()
   if not self.chat_bufnr or not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
     return
   end
+  self._suppress_close = true
 
   local state = self.panel_state or {}
   local model = state.model or 'auto'
@@ -337,21 +326,26 @@ function WindowManager:update_panel_display()
   end
 
   if self.input_winid and vim.api.nvim_win_is_valid(self.input_winid) then
-    if self:_ui_opt('show_model_indicator', true) then
-      vim.api.nvim_win_set_option(self.input_winid, 'statusline', '%#Comment# ' .. model_label .. ' %*')
+    if self:_ui_opt('show_input_title', true) then
+      vim.wo[self.input_winid].winbar = self:_winbar('Input')
     else
-      vim.api.nvim_win_set_option(self.input_winid, 'statusline', '')
+      vim.wo[self.input_winid].winbar = ''
     end
+    if self:_ui_opt('show_model_indicator', true) then
+      vim.wo[self.input_winid].statusline = '%#Comment# ' .. model_label .. ' %*'
+    else
+      vim.wo[self.input_winid].statusline = ' '
+    end
+    pcall(vim.api.nvim_win_set_height, self.input_winid, self.layout.input_height)
+    pcall(vim.api.nvim_win_set_width, self.input_winid, self.layout.width)
   end
   if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-    local chat_cfg = vim.api.nvim_win_get_config(self.chat_winid)
     if self:_ui_opt('show_chat_title', true) then
-      chat_cfg.title = ' Chat - ' .. session_name .. ' '
+      vim.wo[self.chat_winid].winbar = self:_winbar('Chat - ' .. session_name)
     else
-      chat_cfg.title = ''
+      vim.wo[self.chat_winid].winbar = ''
     end
-    chat_cfg.title_pos = 'center'
-    vim.api.nvim_win_set_config(self.chat_winid, chat_cfg)
+    pcall(vim.api.nvim_win_set_width, self.chat_winid, self.layout.width)
   end
 
   local function one_line(value)
@@ -376,30 +370,6 @@ function WindowManager:update_panel_display()
   local auto_hide_queue = self:_ui_opt('auto_hide_queue_when_empty', false)
   local show_queue = (not auto_hide_queue) or #queue > 0
 
-  local ui = vim.api.nvim_list_uis()[1]
-  local total_height = ui and ui.height or (self.layout.history_height + self.layout.input_height + 6)
-  local gap = self.layout.section_gap or 2
-  local reserved = self.layout.input_height + gap
-  if show_queue then
-    reserved = reserved + self.layout.queue_height + gap
-  end
-  local dynamic_chat_height = total_height - reserved
-  if dynamic_chat_height < 6 then
-    dynamic_chat_height = 6
-  end
-  local base_row = dynamic_chat_height + gap
-  self.layout.history_height = dynamic_chat_height
-  self.layout.base_row = base_row
-
-  if self.chat_winid and vim.api.nvim_win_is_valid(self.chat_winid) then
-    local chat_cfg = vim.api.nvim_win_get_config(self.chat_winid)
-    chat_cfg.height = dynamic_chat_height
-    chat_cfg.row = 1
-    chat_cfg.col = self.layout.col
-    chat_cfg.width = self.layout.width
-    vim.api.nvim_win_set_config(self.chat_winid, chat_cfg)
-  end
-
   if #queue > 0 then
     for idx, item in ipairs(queue) do
       local text = one_line(item.message or '')
@@ -417,36 +387,22 @@ function WindowManager:update_panel_display()
     vim.api.nvim_buf_set_option(self.queue_bufnr, 'readonly', true)
   end
 
-  local input_row = base_row
-  local queue_row = base_row
   if show_queue then
     self.queue_winid = self:_open_or_update_context_win(
       self.queue_winid,
       self.queue_bufnr,
-      self:_ui_opt('show_queue_title', true) and ' Queue ' or '',
-      queue_row,
+      self:_ui_opt('show_queue_title', true) and 'Queue' or '',
+      0,
       self.layout.queue_height
     )
     if self.queue_winid and vim.api.nvim_win_is_valid(self.queue_winid) then
-      local queue_cfg = vim.api.nvim_win_get_config(self.queue_winid)
-      queue_cfg.title = self:_ui_opt('show_queue_title', true) and ' Queue ' or ''
-      queue_cfg.title_pos = 'center'
-      vim.api.nvim_win_set_config(self.queue_winid, queue_cfg)
+      pcall(vim.api.nvim_win_set_width, self.queue_winid, self.layout.width)
     end
-    input_row = queue_row + self.layout.queue_height + gap
   else
     self:_close_panel_internal('queue_winid')
-    input_row = queue_row
   end
 
-  if self.input_winid and vim.api.nvim_win_is_valid(self.input_winid) then
-    local input_cfg = vim.api.nvim_win_get_config(self.input_winid)
-    input_cfg.row = input_row
-    input_cfg.col = self.layout.col
-    input_cfg.width = self.layout.width
-    input_cfg.height = self.layout.input_height
-    vim.api.nvim_win_set_config(self.input_winid, input_cfg)
-  end
+  self._suppress_close = false
 end
 
 function WindowManager:_render_chat_lines(lines, roles)
@@ -555,9 +511,18 @@ function WindowManager:get_user_input()
   return message
 end
 
-function WindowManager:focus_input()
+function WindowManager:focus_input(at_end)
   if self.input_winid and vim.api.nvim_win_is_valid(self.input_winid) then
     vim.api.nvim_set_current_win(self.input_winid)
+    if at_end then
+      local line = ''
+      if self.input_bufnr and vim.api.nvim_buf_is_valid(self.input_bufnr) then
+        line = vim.api.nvim_buf_get_lines(self.input_bufnr, 0, 1, false)[1] or ''
+      end
+      vim.api.nvim_win_set_cursor(self.input_winid, { 1, #line })
+      vim.cmd('startinsert!')
+      return
+    end
     vim.api.nvim_win_set_cursor(self.input_winid, {1, 0})
     vim.cmd('stopinsert')
     vim.defer_fn(function()
