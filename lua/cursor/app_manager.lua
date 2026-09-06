@@ -510,20 +510,28 @@ function AppManager:_each_file_buffer(path, callback)
   end
 end
 
-function AppManager:_apply_buffer_lines(bufnr, lines)
+function AppManager:_apply_buffer_lines(bufnr, lines, opts)
+  opts = opts or {}
   if not vim.api.nvim_buf_is_loaded(bufnr) then
     pcall(vim.fn.bufload, bufnr)
   end
   if not vim.api.nvim_buf_is_loaded(bufnr) or vim.bo[bufnr].buftype ~= '' then
     return false
   end
+  if opts.skip_modified and vim.bo[bufnr].modified then
+    return false
+  end
   vim.bo[bufnr].modifiable = true
-  local undolevels = vim.bo[bufnr].undolevels
-  vim.bo[bufnr].undolevels = -1
   local ok = pcall(vim.api.nvim_buf_set_lines, bufnr, 0, -1, false, lines)
-  vim.bo[bufnr].undolevels = undolevels
-  vim.bo[bufnr].modified = false
-  return ok
+  if not ok then
+    return false
+  end
+  if opts.modified == nil then
+    vim.bo[bufnr].modified = false
+  else
+    vim.bo[bufnr].modified = opts.modified and true or false
+  end
+  return true
 end
 
 function AppManager:_set_loaded_buffer_content(path, content)
@@ -535,7 +543,7 @@ function AppManager:_set_loaded_buffer_content(path, content)
     end
   end
   self:_each_file_buffer(path, function(bufnr)
-    self:_apply_buffer_lines(bufnr, lines)
+    self:_apply_buffer_lines(bufnr, lines, { skip_modified = true, modified = false })
   end)
 end
 
@@ -573,7 +581,7 @@ function AppManager:_reload_file_buffers(path, lines)
   end
 
   for _, bufnr in ipairs(bufs) do
-    if self:_apply_buffer_lines(bufnr, lines) then
+    if self:_apply_buffer_lines(bufnr, lines, { skip_modified = true, modified = false }) then
       pcall(vim.api.nvim_exec_autocmds, 'BufWritePost', {
         buffer = bufnr,
         modeline = false,
@@ -1080,6 +1088,9 @@ function AppManager:open_chat()
   self.cursor_manager:set_file_read_handler(function(path)
     local local_paths = self:_filter_project_local_paths({ path })
     self:_capture_checkpoint_files(local_paths)
+    for _, local_path in ipairs(local_paths) do
+      self:_capture_buffer_before(local_path)
+    end
   end)
   
   self.window_manager.opts = self.opts
@@ -1749,6 +1760,7 @@ function AppManager:_mark_review_pending(paths)
           baseline = self:_capture_review_baseline(normalized),
         }
       end
+      self:_capture_buffer_before(normalized)
     end
   end
 end
@@ -1758,6 +1770,51 @@ function AppManager:_clear_review_entry(path)
   if normalized and self.review then
     self.review[normalized] = nil
   end
+  if normalized and self._buffer_before then
+    self._buffer_before[normalized] = nil
+  end
+end
+
+function AppManager:_capture_buffer_before(path)
+  local normalized = self:_normalize_checkpoint_path(path)
+  if not normalized then
+    return
+  end
+  self._buffer_before = self._buffer_before or {}
+  self._buffer_before[normalized] = self._buffer_before[normalized] or {}
+  local store = self._buffer_before[normalized]
+  self:_each_file_buffer(normalized, function(bufnr)
+    if store[bufnr] then
+      return
+    end
+    if not vim.api.nvim_buf_is_loaded(bufnr) or vim.bo[bufnr].buftype ~= '' then
+      return
+    end
+    store[bufnr] = {
+      lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+      modified = vim.bo[bufnr].modified,
+    }
+  end)
+  local entry = (self.review or {})[normalized]
+  if type(entry) == 'table' then
+    entry.buffer_before = store
+  end
+end
+
+function AppManager:_restore_buffers_from_before(path, buffer_before)
+  if type(buffer_before) == 'table' then
+    for key, snap in pairs(buffer_before) do
+      local bufnr = tonumber(key) or key
+      if type(bufnr) == 'number' and vim.api.nvim_buf_is_valid(bufnr) and type(snap) == 'table' then
+        self:_apply_buffer_lines(bufnr, snap.lines or { '' }, {
+          modified = snap.modified and true or false,
+        })
+      end
+    end
+    return
+  end
+  -- No pre-agent buffer snapshot: only refresh clean buffers from disk.
+  self:_reload_file_buffers(path)
 end
 
 function AppManager:_reconcile_review_after_restore(path)
@@ -1999,6 +2056,8 @@ function AppManager:reject_change(path, opts)
     end
     return false
   end
+  local _, review_entry = self:_review_entry(normalized)
+  local buffer_before = type(review_entry) == 'table' and review_entry.buffer_before or nil
   if not self:_file_matches_snapshot(normalized, entry) then
     if not self:_restore_file_from_entry(normalized, entry) then
       if not opts.silent then
@@ -2009,8 +2068,7 @@ function AppManager:reject_change(path, opts)
   elseif not opts.silent then
     vim.notify('Already matches snapshot: ' .. vim.fn.fnamemodify(normalized, ':.'), vim.log.levels.INFO)
   end
-  -- Disk is the restored baseline. Refresh clean buffers only.
-  self:_reload_clean_buffers_from_disk(normalized)
+  self:_restore_buffers_from_before(normalized, buffer_before)
   self:_clear_review_entry(normalized)
   if not opts.nosync then
     self:_sync_changes_quickfix(false)
