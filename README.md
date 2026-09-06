@@ -11,7 +11,7 @@ A Neovim plugin that connects Neovim to Cursor's agent via **ACP (Agent Client P
 
 ### Working Features
 
-- **Multi-Panel Chat UI**: Dedicated floating sections for `Chat`, `Queue`, and `Input` (with stable titled boxes).
+- **Multi-Panel Chat UI**: Right-hand split for `Chat` (top) and `Input` (below), with `Queue` only when something is queued. Titles use `winbar`.
 - **Streaming Responses**: Real‑time, token‑by‑token streaming of AI responses using Cursor's ACP implementation (`agent acp`), very close to how Cursor desktop behaves.
 - **ACP Integration**: Uses Cursor's ACP server instead of the old `cursor-agent` streaming protocol, with a small JSON‑RPC client implemented in Lua.
 - **File & Terminal Tools**: Implements ACP filesystem and terminal methods so the agent can read/write files and run commands in your Neovim project (when you allow it).
