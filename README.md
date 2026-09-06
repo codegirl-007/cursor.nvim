@@ -21,7 +21,7 @@ A Neovim plugin that connects Neovim to Cursor's agent via **ACP (Agent Client P
 - **Focus Cycling**: `<C-]>` cycles across chat panes (`Chat -> Queue -> Input`).
 - **Model Indicator**: Active model label (`Auto`, etc.) is shown near input.
 - **Image Attachments**: Pasted/drag-dropped image paths are captured and sent as ACP image attachments, while preserving free-form text prompting.
-- **Change View (Current Batch)**: When a response includes structured edits (via code blocks), the plugin shows a quickfix list of changed files and lets you apply or revert them with simple keybinds.
+- **Cursor Changes Quickfix**: Agent writes and structured edits populate a `Cursor Changes` quickfix list (not git status).
 - **Status Indicators**: Lightweight status line in the chat buffer showing whether the agent is idle, processing, streaming, or stopped.
 - **Project-Persistent Sessions**: Chat history is persisted per project, with support for multiple sessions and session switching.
 - **Real Session Mapping (UI <-> ACP)**: Each UI session stores its own backend ACP session binding, so switching sessions also switches backend context.

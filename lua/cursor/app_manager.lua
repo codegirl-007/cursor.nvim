@@ -796,6 +796,10 @@ function AppManager:open_chat()
     local local_paths = self:_filter_project_local_paths(affected_files or {})
     self:_capture_checkpoint_files(local_paths)
     self.chat_manager:add_affected_files(local_paths)
+    if #local_paths > 0 then
+      self._open_changes_qf = true
+    end
+    self:_sync_changes_quickfix(false)
     self.chat_manager:upsert_activity_message(content)
     self:_persist_current_session()
     self:_sync_queue_display(false)
@@ -805,6 +809,10 @@ function AppManager:open_chat()
     local local_paths = self:_filter_project_local_paths({ path })
     self:_capture_checkpoint_files(local_paths)
     self.chat_manager:add_affected_files(local_paths)
+    if #local_paths > 0 then
+      self._open_changes_qf = true
+    end
+    self:_sync_changes_quickfix(false)
     self:_persist_current_session()
     self:_sync_queue_display(false)
   end)
@@ -1202,8 +1210,9 @@ function AppManager:send_message(message_or_item)
 
       if changes and #changes > 0 then
         self.chat_manager:set_last_changes(changes)
-        self:show_last_changes()
+        self._open_changes_qf = true
       end
+      self:show_last_changes()
 
       self:_persist_current_session()
       self.window_manager:update_chat_display(self.chat_manager)
@@ -1358,41 +1367,139 @@ function AppManager:revert_changes()
   self.chat_manager:clear_last_changes()
 end
 
-function AppManager:show_last_changes()
-  local last_changes = self.chat_manager:get_last_changes()
-  if not last_changes or #last_changes == 0 then
+function AppManager:_cursor_qf_info()
+  local id = self._changes_qf_id
+  if not id or id == 0 then
+    return nil
+  end
+  local info = vim.fn.getqflist({ id = id, nr = 0, title = 0 })
+  if type(info) ~= 'table' or info.id ~= id then
+    self._changes_qf_id = nil
+    return nil
+  end
+  return info
+end
+
+function AppManager:_cursor_qf_is_current()
+  local info = self:_cursor_qf_info()
+  if not info then
+    return false
+  end
+  local current = vim.fn.getqflist({ id = 0 })
+  return type(current) == 'table' and current.id == info.id
+end
+
+function AppManager:_select_qf_nr(nr)
+  if type(nr) ~= 'number' or nr < 1 then
+    return false
+  end
+  return pcall(vim.cmd, 'silent ' .. tostring(nr) .. 'chistory')
+end
+
+function AppManager:_write_cursor_qf(items)
+  local info = self:_cursor_qf_info()
+  if info then
+    vim.fn.setqflist({}, 'r', {
+      id = info.id,
+      title = 'Cursor Changes',
+      items = items,
+    })
+    return info.id
+  end
+
+  -- Append at the end of the stack (nr = '$') so :colder history after
+  -- the current list is not discarded, then restore what the user
+  -- was viewing.
+  local previous = vim.fn.getqflist({ id = 0, nr = 0 })
+  vim.fn.setqflist({}, ' ', {
+    nr = '$',
+    title = 'Cursor Changes',
+    items = items,
+  })
+  local created = vim.fn.getqflist({ id = 0 })
+  self._changes_qf_id = created.id
+  if type(previous) == 'table' and previous.nr and previous.nr > 0 and previous.id ~= created.id then
+    self:_select_qf_nr(previous.nr)
+  end
+  return self._changes_qf_id
+end
+
+function AppManager:_qf_window_is_open()
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local info = vim.fn.getwininfo(win)[1]
+    if info and info.quickfix == 1 and (not info.loclist or info.loclist == 0) then
+      return true
+    end
+  end
+  return false
+end
+
+function AppManager:_sync_changes_quickfix(open)
+  local items = {}
+  local seen = {}
+
+  local function add(path, lnum, text)
+    if type(path) ~= 'string' or path == '' then
+      return
+    end
+    path = self:_normalize_checkpoint_path(path) or path
+    if seen[path] then
+      return
+    end
+    seen[path] = true
+    local bufnr = vim.fn.bufnr(path, false)
+    table.insert(items, {
+      bufnr = bufnr ~= -1 and bufnr or nil,
+      filename = path,
+      lnum = lnum or 1,
+      col = 1,
+      text = text or 'changed',
+    })
+  end
+
+  for _, change in ipairs(self.chat_manager:get_last_changes() or {}) do
+    if type(change) == 'table' and change.type == 'edit' then
+      add(change.file, change.start_line, 'changed')
+    end
+  end
+  for _, path in ipairs(self.chat_manager:get_affected_files() or {}) do
+    add(path, 1, 'changed')
+  end
+
+  if #items == 0 then
+    if not self:_cursor_qf_info() then
+      return
+    end
+    self:_write_cursor_qf({})
+    if self:_cursor_qf_is_current() then
+      vim.cmd('cclose')
+    end
     return
   end
 
-  local qf_items = {}
-  for _, change in ipairs(last_changes) do
-    if change.type == 'edit' and change.file then
-      local bufnr = vim.fn.bufnr(change.file, false)
-      table.insert(qf_items, {
-        bufnr = bufnr ~= -1 and bufnr or nil,
-        filename = change.file,
-        lnum = change.start_line or 1,
-        col = 1,
-        text = 'Cursor change: ' .. change.file,
-      })
-    end
-  end
-  
-  if #qf_items == 0 then
+  self:_write_cursor_qf(items)
+  if not open then
     return
   end
-  
-  vim.fn.setqflist(qf_items, 'r', { title = 'Cursor Changes' })
-  vim.cmd('botright copen')
-  
-  local info = vim.fn.getqflist({ winid = 1 })
-  local winid = info.winid
-  if winid ~= nil and winid ~= 0 and vim.api.nvim_win_is_valid(winid) then
-    local bufnr = vim.api.nvim_win_get_buf(winid)
-    if self.binding_manager then
-      self.binding_manager:register_diff_bindings_for_buffer(bufnr)
-    end
+  if self:_qf_window_is_open() then
+    return
   end
+
+  local info = self:_cursor_qf_info()
+  if info then
+    self:_select_qf_nr(info.nr)
+  end
+  local prev = vim.api.nvim_get_current_win()
+  vim.cmd('botright copen')
+  if vim.api.nvim_win_is_valid(prev) then
+    vim.api.nvim_set_current_win(prev)
+  end
+end
+
+function AppManager:show_last_changes()
+  local should_open = self._open_changes_qf
+  self._open_changes_qf = false
+  self:_sync_changes_quickfix(should_open == true)
 end
 
 return AppManager
