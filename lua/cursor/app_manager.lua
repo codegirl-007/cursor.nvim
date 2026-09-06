@@ -1367,6 +1367,71 @@ function AppManager:revert_changes()
   self.chat_manager:clear_last_changes()
 end
 
+function AppManager:_cursor_qf_info()
+  local id = self._changes_qf_id
+  if not id or id == 0 then
+    return nil
+  end
+  local info = vim.fn.getqflist({ id = id, nr = 0, title = 0 })
+  if type(info) ~= 'table' or info.id ~= id then
+    self._changes_qf_id = nil
+    return nil
+  end
+  return info
+end
+
+function AppManager:_cursor_qf_is_current()
+  local info = self:_cursor_qf_info()
+  if not info then
+    return false
+  end
+  local current = vim.fn.getqflist({ id = 0 })
+  return type(current) == 'table' and current.id == info.id
+end
+
+function AppManager:_select_qf_nr(nr)
+  if type(nr) ~= 'number' or nr < 1 then
+    return false
+  end
+  return pcall(vim.cmd, 'silent ' .. tostring(nr) .. 'chistory')
+end
+
+function AppManager:_write_cursor_qf(items)
+  local info = self:_cursor_qf_info()
+  if info then
+    vim.fn.setqflist({}, 'r', {
+      id = info.id,
+      title = 'Cursor Changes',
+      items = items,
+    })
+    return info.id
+  end
+
+  -- Push a new list, then restore the list the user was viewing so
+  -- creating Cursor Changes never replaces grep/compiler results.
+  local previous = vim.fn.getqflist({ id = 0, nr = 0 })
+  vim.fn.setqflist({}, ' ', {
+    title = 'Cursor Changes',
+    items = items,
+  })
+  local created = vim.fn.getqflist({ id = 0 })
+  self._changes_qf_id = created.id
+  if type(previous) == 'table' and previous.nr and previous.nr > 0 and previous.id ~= created.id then
+    self:_select_qf_nr(previous.nr)
+  end
+  return self._changes_qf_id
+end
+
+function AppManager:_qf_window_is_open()
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local info = vim.fn.getwininfo(win)[1]
+    if info and info.quickfix == 1 and (not info.loclist or info.loclist == 0) then
+      return true
+    end
+  end
+  return false
+end
+
 function AppManager:_sync_changes_quickfix(open)
   local items = {}
   local seen = {}
@@ -1399,35 +1464,29 @@ function AppManager:_sync_changes_quickfix(open)
     add(path, 1, 'changed')
   end
 
-  local qf = vim.fn.getqflist({ title = 1 })
-  local ours = qf.title == 'Cursor Changes'
-  if #items == 0 and not ours then
-    return
-  end
-
-  vim.fn.setqflist({}, 'r', { title = 'Cursor Changes', items = items })
   if #items == 0 then
-    if ours then
+    if not self:_cursor_qf_info() then
+      return
+    end
+    self:_write_cursor_qf({})
+    if self:_cursor_qf_is_current() then
       vim.cmd('cclose')
     end
     return
   end
+
+  self:_write_cursor_qf(items)
   if not open then
     return
   end
-
-  local qf_open = false
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
-    local info = vim.fn.getwininfo(win)[1]
-    if info and info.quickfix == 1 then
-      qf_open = true
-      break
-    end
-  end
-  if qf_open then
+  if self:_qf_window_is_open() then
     return
   end
 
+  local info = self:_cursor_qf_info()
+  if info then
+    self:_select_qf_nr(info.nr)
+  end
   local prev = vim.api.nvim_get_current_win()
   vim.cmd('botright copen')
   if vim.api.nvim_win_is_valid(prev) then
