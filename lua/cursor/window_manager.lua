@@ -16,8 +16,6 @@ function WindowManager.new()
   self.chat_width = 50
   self.chat_bufnr = nil
   self.chat_winid = nil
-  self.affected_bufnr = nil
-  self.affected_winid = nil
   self.queue_bufnr = nil
   self.queue_winid = nil
   self.input_bufnr = nil
@@ -30,7 +28,6 @@ function WindowManager.new()
     history_height = 0,
     base_row = 0,
     input_height = 3,
-    affected_height = 4,
     queue_height = 4,
     section_gap = 2,
   }
@@ -58,7 +55,6 @@ function WindowManager:wipe_owned_buffers()
   for _, buf in ipairs({
     self.chat_bufnr,
     self.input_bufnr,
-    self.affected_bufnr,
     self.queue_bufnr,
   }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
@@ -163,17 +159,15 @@ function WindowManager:create_chat_window()
   local ui = vim.api.nvim_list_uis()[1]
   local width = ui.width
   local height = ui.height
-  local affected_height = self:_ui_opt('affected_height', 4)
   local queue_height = self:_ui_opt('queue_height', 4)
   local section_gap = self:_ui_opt('section_gap', 2)
   
   self.chat_bufnr = self:_create_panel_buf('cursor-chat-history', true)
   self.input_bufnr = self:_create_panel_buf('cursor-chat-input', false)
-  self.affected_bufnr = self:_create_panel_buf('cursor-chat-affected', true)
   self.queue_bufnr = self:_create_panel_buf('cursor-chat-queue', true)
   
   local input_height = self:_ui_opt('input_height', 3)
-  local history_height = height - input_height - affected_height - queue_height - 6
+  local history_height = height - input_height - queue_height - 6
   if history_height < 6 then
     history_height = 6
   end
@@ -185,7 +179,6 @@ function WindowManager:create_chat_window()
     history_height = history_height,
     base_row = base_row,
     input_height = input_height,
-    affected_height = affected_height,
     queue_height = queue_height,
     section_gap = section_gap,
   }
@@ -214,22 +207,10 @@ function WindowManager:create_chat_window()
     width = chat_width,
     height = input_height,
     col = col,
-    row = base_row + affected_height + section_gap + queue_height + section_gap,
+    row = base_row + queue_height + section_gap,
     style = 'minimal',
     border = 'single',
     title = self:_ui_opt('show_input_title', true) and ' Input ' or '',
-    title_pos = 'center',
-  })
-
-  self.affected_winid = vim.api.nvim_open_win(self.affected_bufnr, false, {
-    relative = 'editor',
-    width = chat_width,
-    height = affected_height,
-    col = col,
-    row = base_row,
-    style = 'minimal',
-    border = 'single',
-    title = self:_ui_opt('show_affected_title', true) and ' Affected Files ' or '',
     title_pos = 'center',
   })
 
@@ -238,7 +219,7 @@ function WindowManager:create_chat_window()
     width = chat_width,
     height = queue_height,
     col = col,
-    row = base_row + affected_height + section_gap,
+    row = base_row,
     style = 'minimal',
     border = 'single',
     title = self:_ui_opt('show_queue_title', true) and ' Queue ' or '',
@@ -252,7 +233,6 @@ function WindowManager:create_chat_window()
   vim.api.nvim_win_set_option(self.input_winid, 'signcolumn', 'no')
   vim.api.nvim_win_set_option(self.input_winid, 'foldcolumn', '0')
   vim.api.nvim_win_set_option(self.input_winid, 'winfixheight', true)
-  self:_setup_context_win_options(self.affected_winid)
   self:_setup_context_win_options(self.queue_winid)
   
   if self:_ui_opt('show_model_indicator', true) then
@@ -274,13 +254,12 @@ function WindowManager:create_chat_window()
 
   self:_watch_panel_close('chat_winid')
   self:_watch_panel_close('input_winid')
-  self:_watch_panel_close('affected_winid')
   self:_watch_panel_close('queue_winid')
 end
 
 function WindowManager:close_chat_window()
   self._suppress_close = true
-  for _, win in ipairs({ self.chat_winid, self.input_winid, self.affected_winid, self.queue_winid }) do
+  for _, win in ipairs({ self.chat_winid, self.input_winid, self.queue_winid }) do
     if win and vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
     end
@@ -288,8 +267,6 @@ function WindowManager:close_chat_window()
   self:wipe_owned_buffers()
   self.chat_winid = nil
   self.chat_bufnr = nil
-  self.affected_winid = nil
-  self.affected_bufnr = nil
   self.queue_winid = nil
   self.queue_bufnr = nil
   self.input_winid = nil
@@ -344,7 +321,7 @@ function WindowManager:_open_or_update_context_win(winid, bufnr, title, row, hei
 end
 
 function WindowManager:update_panel_display()
-  if not self.affected_bufnr or not vim.api.nvim_buf_is_valid(self.affected_bufnr) then
+  if not self.chat_bufnr or not vim.api.nvim_buf_is_valid(self.chat_bufnr) then
     return
   end
 
@@ -387,21 +364,6 @@ function WindowManager:update_panel_display()
     return text
   end
 
-  local affected_lines = {}
-  local affected = state.affected_files or {}
-  if #affected == 0 then
-    table.insert(affected_lines, '(none)')
-  else
-    for _, path in ipairs(affected) do
-      table.insert(affected_lines, '- ' .. one_line(path))
-    end
-  end
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'modifiable', true)
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'readonly', false)
-  vim.api.nvim_buf_set_lines(self.affected_bufnr, 0, -1, false, affected_lines)
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'modifiable', false)
-  vim.api.nvim_buf_set_option(self.affected_bufnr, 'readonly', true)
-
   local queue_lines = {}
   local current_request = state.current_request
   if current_request and type(current_request.message) == 'string' and current_request.message ~= '' then
@@ -412,17 +374,12 @@ function WindowManager:update_panel_display()
 
   local queue = state.request_queue or {}
   local auto_hide_queue = self:_ui_opt('auto_hide_queue_when_empty', false)
-  local auto_hide_affected = self:_ui_opt('auto_hide_affected_when_empty', false)
   local show_queue = (not auto_hide_queue) or #queue > 0
-  local show_affected = (not auto_hide_affected) or #affected > 0
 
   local ui = vim.api.nvim_list_uis()[1]
   local total_height = ui and ui.height or (self.layout.history_height + self.layout.input_height + 6)
   local gap = self.layout.section_gap or 2
   local reserved = self.layout.input_height + gap
-  if show_affected then
-    reserved = reserved + self.layout.affected_height + gap
-  end
   if show_queue then
     reserved = reserved + self.layout.queue_height + gap
   end
@@ -460,24 +417,8 @@ function WindowManager:update_panel_display()
     vim.api.nvim_buf_set_option(self.queue_bufnr, 'readonly', true)
   end
 
-  if show_affected then
-    self.affected_winid = self:_open_or_update_context_win(
-      self.affected_winid,
-      self.affected_bufnr,
-      self:_ui_opt('show_affected_title', true) and ' Affected Files ' or '',
-      base_row,
-      self.layout.affected_height
-    )
-  else
-    self:_close_panel_internal('affected_winid')
-  end
-
-  local input_row = self.layout.base_row
-  input_row = base_row
+  local input_row = base_row
   local queue_row = base_row
-  if show_affected then
-    queue_row = base_row + self.layout.affected_height + gap
-  end
   if show_queue then
     self.queue_winid = self:_open_or_update_context_win(
       self.queue_winid,
@@ -637,11 +578,6 @@ function WindowManager:focus_chat()
 end
 
 function WindowManager:focus_panel()
-  if self.affected_winid and vim.api.nvim_win_is_valid(self.affected_winid) then
-    vim.api.nvim_set_current_win(self.affected_winid)
-    vim.cmd('stopinsert')
-    return
-  end
   if self.queue_winid and vim.api.nvim_win_is_valid(self.queue_winid) then
     vim.api.nvim_set_current_win(self.queue_winid)
     vim.cmd('stopinsert')

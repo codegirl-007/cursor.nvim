@@ -52,7 +52,6 @@ function BindingManager:register_chat_bindings(window_manager)
   local app_mgr = self.app_manager
   local input_bufnr = window_manager.input_bufnr
   local chat_bufnr = window_manager.chat_bufnr
-  local affected_bufnr = window_manager.affected_bufnr
   local queue_bufnr = window_manager.queue_bufnr
 
   if not input_bufnr or not chat_bufnr then
@@ -145,7 +144,6 @@ function BindingManager:register_chat_bindings(window_manager)
   end
 
   register_history_bindings(chat_bufnr)
-  register_history_bindings(affected_bufnr)
   register_history_bindings(queue_bufnr)
 
   vim.bo[input_bufnr].completefunc = "v:lua.require'cursor.slash'.complete"
