@@ -1407,10 +1407,12 @@ function AppManager:_write_cursor_qf(items)
     return info.id
   end
 
-  -- Push a new list, then restore the list the user was viewing so
-  -- creating Cursor Changes never replaces grep/compiler results.
+  -- Append at the end of the stack (nr = '$') so :colder history after
+  -- the current list is not discarded, then restore what the user
+  -- was viewing.
   local previous = vim.fn.getqflist({ id = 0, nr = 0 })
   vim.fn.setqflist({}, ' ', {
+    nr = '$',
     title = 'Cursor Changes',
     items = items,
   })
