@@ -22,6 +22,14 @@ function BindingManager.new(app_manager)
       revert = "r",
       close = "q",
     },
+    review = {
+      accept = "a",
+      reject = "r",
+      accept_all = "A",
+      reject_all = "R",
+      diff = "d",
+      close = "q",
+    },
   }
   self.bindings = {}
   self.enabled = true
@@ -41,6 +49,7 @@ function BindingManager:setup(opts)
   self.bindings = {
     chat = vim.tbl_extend("force", self.default_bindings.chat, opts.chat or {}),
     diff = vim.tbl_extend("force", self.default_bindings.diff, opts.diff or {}),
+    review = vim.tbl_extend("force", self.default_bindings.review, opts.review or {}),
   }
 end
 
@@ -335,6 +344,61 @@ function BindingManager:register_chat_bindings(window_manager)
       silent = true,
       noremap = true,
     })
+  end
+end
+
+function BindingManager:register_review_bindings(bufnr)
+  if not self.enabled or not self.bindings.review or not bufnr then
+    return
+  end
+  if vim.b[bufnr].cursor_review_bound then
+    return
+  end
+  vim.b[bufnr].cursor_review_bound = true
+
+  local app_mgr = self.app_manager
+  local function if_review(fn)
+    return function()
+      if vim.fn.getqflist({ title = 1 }).title ~= 'Cursor Changes' then
+        return
+      end
+      fn()
+    end
+  end
+  local maps = {
+    accept = if_review(function()
+      app_mgr:accept_change()
+    end),
+    reject = if_review(function()
+      app_mgr:reject_change()
+    end),
+    accept_all = if_review(function()
+      app_mgr:accept_all_changes()
+    end),
+    reject_all = if_review(function()
+      app_mgr:reject_all_changes()
+    end),
+    diff = if_review(function()
+      app_mgr:diff_change()
+    end),
+    close = function()
+      if vim.fn.getqflist({ title = 1 }).title == 'Cursor Changes' then
+        vim.cmd('cclose')
+      end
+    end,
+  }
+
+  for action, fn in pairs(maps) do
+    local lhs = self.bindings.review[action]
+    if lhs then
+      vim.keymap.set('n', lhs, fn, {
+        buffer = bufnr,
+        desc = 'cursor review: ' .. action,
+        silent = true,
+        noremap = true,
+        nowait = true,
+      })
+    end
   end
 end
 
