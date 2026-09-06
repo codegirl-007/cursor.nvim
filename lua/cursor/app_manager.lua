@@ -574,7 +574,18 @@ function AppManager:revert_last_checkpoint()
   else
     self.chat_manager:add_message('assistant', 'Reverted checkpoint for: ' .. (cp.user_message or 'previous request'))
   end
-  self.review = {}
+  local reverted = {}
+  for _, path in ipairs(cp.order or {}) do
+    reverted[path] = true
+  end
+  if type(cp.files) == 'table' then
+    for path, _ in pairs(cp.files) do
+      reverted[path] = true
+    end
+  end
+  for path in pairs(reverted) do
+    self:_clear_review_entry(path)
+  end
   self:_sync_queue_display(false)
   self:_sync_changes_quickfix(false)
   self:_persist_current_session()
@@ -584,6 +595,8 @@ function AppManager:revert_last_checkpoint()
 end
 
 function AppManager:_load_current_session_into_chat()
+  -- Review is in-process only: it does not persist across sessions
+  -- or Neovim restarts, so a session switch starts with a clean queue.
   self.review = {}
   local session = self:_get_current_session()
   if not session then
