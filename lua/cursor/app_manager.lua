@@ -33,6 +33,7 @@ function AppManager.new()
   self.next_checkpoint_id = 1
   self.current_checkpoint = nil
   self.checkpoints = {}
+  self.review_by_session = {}
   self.review = {}
   
   return self
@@ -584,7 +585,7 @@ function AppManager:revert_last_checkpoint()
     end
   end
   for path in pairs(reverted) do
-    self:_clear_review_entry(path)
+    self:_reconcile_review_after_restore(path)
   end
   self:_sync_queue_display(false)
   self:_sync_changes_quickfix(false)
@@ -594,10 +595,24 @@ function AppManager:revert_last_checkpoint()
   return true
 end
 
+function AppManager:_bind_current_review()
+  self:_ensure_session_store()
+  self.review_by_session = self.review_by_session or {}
+  local id = self.current_session_id
+  if type(id) ~= 'string' or id == '' then
+    id = '__no_session__'
+  end
+  if type(self.review_by_session[id]) ~= 'table' then
+    self.review_by_session[id] = {}
+  end
+  self.review = self.review_by_session[id]
+  return self.review
+end
+
 function AppManager:_load_current_session_into_chat()
-  -- Review is in-process only: it does not persist across sessions
-  -- or Neovim restarts, so a session switch starts with a clean queue.
-  self.review = {}
+  -- Review is in-memory and scoped to the current chat session.
+  -- Switching sessions must not discard another session's pending set.
+  self:_bind_current_review()
   local session = self:_get_current_session()
   if not session then
     self.chat_manager:initialize()
@@ -667,6 +682,9 @@ function AppManager:delete_session(session_id)
   end
 
   self:_ensure_session_store()
+  if self.review_by_session then
+    self.review_by_session[session_id] = nil
+  end
   local kept = {}
   for _, session in ipairs(self.session_store.sessions) do
     if session.id ~= session_id then
@@ -1496,7 +1514,7 @@ function AppManager:_capture_review_baseline(path)
 end
 
 function AppManager:_mark_review_pending(paths)
-  self.review = self.review or {}
+  self:_bind_current_review()
   if type(paths) ~= 'table' then
     return
   end
@@ -1518,6 +1536,21 @@ function AppManager:_clear_review_entry(path)
   local normalized = self:_normalize_checkpoint_path(path)
   if normalized and self.review then
     self.review[normalized] = nil
+  end
+end
+
+function AppManager:_reconcile_review_after_restore(path)
+  local normalized, entry = self:_review_entry(path)
+  if not normalized or not self:_is_review_pending(normalized) then
+    return
+  end
+  local baseline = type(entry) == 'table' and entry.baseline or nil
+  if type(baseline) ~= 'table' then
+    local _, snap = self:_review_baseline(normalized)
+    baseline = snap
+  end
+  if type(baseline) == 'table' and self:_file_matches_snapshot(normalized, baseline) then
+    self:_clear_review_entry(normalized)
   end
 end
 
@@ -1882,6 +1915,11 @@ function AppManager:_sync_changes_quickfix(open)
   end
   for _, path in ipairs(self.chat_manager:get_affected_files() or {}) do
     add(path, 1, 'changed')
+  end
+  for path, entry in pairs(self.review or {}) do
+    if (type(entry) == 'table' and entry.status == 'pending') or entry == 'pending' then
+      add(path, 1, 'changed')
+    end
   end
 
   if #items == 0 then
