@@ -402,20 +402,34 @@ end
 
 function AppManager:_set_loaded_buffer_content(path, content)
   local normalized_path = self:_normalize_checkpoint_path(path)
+  local lines = {}
+  if content and content ~= '' then
+    lines = vim.split(content, '\n', { plain = true })
+    if #lines > 0 and lines[#lines] == '' then
+      table.remove(lines, #lines)
+    end
+  end
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) and vim.api.nvim_buf_get_name(bufnr) == normalized_path then
-      local lines = {}
-      if content and content ~= '' then
-        lines = vim.split(content, '\n', { plain = true })
-        if #lines > 0 and lines[#lines] == '' then
-          table.remove(lines, #lines)
-        end
-      end
+    if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].buftype == ''
+        and vim.api.nvim_buf_get_name(bufnr) == normalized_path
+        and not vim.bo[bufnr].modified then
       vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
       vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
       vim.api.nvim_buf_set_option(bufnr, 'modified', false)
     end
   end
+end
+
+function AppManager:_reload_clean_buffers_from_disk(path)
+  local normalized = self:_normalize_checkpoint_path(path)
+  if not normalized then
+    return
+  end
+  local content = ''
+  if vim.fn.filereadable(normalized) == 1 then
+    content = self:_read_file_raw(normalized) or ''
+  end
+  self:_set_loaded_buffer_content(normalized, content)
 end
 
 function AppManager:_create_checkpoint(message, chat_state_before)
@@ -1428,22 +1442,6 @@ function AppManager:_qf_window_is_open()
   return false
 end
 
-function AppManager:_save_file_buffers(path)
-  local normalized = self:_normalize_checkpoint_path(path)
-  if not normalized then
-    return
-  end
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].buftype == '' then
-      if vim.api.nvim_buf_get_name(bufnr) == normalized then
-        vim.api.nvim_buf_call(bufnr, function()
-          pcall(vim.cmd, 'silent update')
-        end)
-      end
-    end
-  end
-end
-
 function AppManager:_review_entry(path)
   local normalized = self:_normalize_checkpoint_path(path)
   if not normalized then
@@ -1617,6 +1615,49 @@ function AppManager:_review_path_under_cursor()
   return nil
 end
 
+function AppManager:_review_qf_bufnr()
+  local info = vim.fn.getqflist({ winid = 1 })
+  if info.winid and info.winid ~= 0 and vim.api.nvim_win_is_valid(info.winid) then
+    return vim.api.nvim_win_get_buf(info.winid)
+  end
+  if vim.bo.filetype == 'qf' then
+    return vim.api.nvim_get_current_buf()
+  end
+  return nil
+end
+
+function AppManager:_watch_review_qf_buf(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  if vim.b[bufnr].cursor_review_watch then
+    return
+  end
+  vim.b[bufnr].cursor_review_watch = true
+  vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter', 'TextChanged' }, {
+    buffer = bufnr,
+    callback = function()
+      self:_sync_review_qf_bindings()
+    end,
+  })
+end
+
+function AppManager:_sync_review_qf_bindings()
+  if not self.binding_manager then
+    return
+  end
+  local bufnr = self:_review_qf_bufnr()
+  if not bufnr then
+    return
+  end
+  self:_watch_review_qf_buf(bufnr)
+  if self:_cursor_qf_is_current() then
+    self.binding_manager:register_review_bindings(bufnr)
+  else
+    self.binding_manager:unregister_review_bindings(bufnr)
+  end
+end
+
 function AppManager:_ensure_review_qf_bindings()
   if not self.binding_manager then
     return
@@ -1625,16 +1666,33 @@ function AppManager:_ensure_review_qf_bindings()
     self._review_qf_autocmd = vim.api.nvim_create_autocmd('FileType', {
       pattern = 'qf',
       callback = function(ev)
-        if self:_cursor_qf_is_current() then
-          self.binding_manager:register_review_bindings(ev.buf)
+        self:_watch_review_qf_buf(ev.buf)
+        self:_sync_review_qf_bindings()
+      end,
+    })
+    self._review_qf_cmd_autocmd = vim.api.nvim_create_autocmd('QuickFixCmdPost', {
+      callback = function()
+        self:_sync_review_qf_bindings()
+      end,
+    })
+    -- :colder/:cnewer do not fire QuickFixCmdPost. Re-sync after those
+    -- commands so review maps do not stay on an unrelated list.
+    self._review_qf_cmdline_autocmd = vim.api.nvim_create_autocmd('CmdlineLeave', {
+      callback = function()
+        local cmd = vim.fn.getcmdline()
+        if type(cmd) ~= 'string' then
+          return
+        end
+        if cmd:find('colder', 1, true) or cmd:find('cnewer', 1, true)
+            or cmd:find('chistory', 1, true) then
+          vim.schedule(function()
+            self:_sync_review_qf_bindings()
+          end)
         end
       end,
     })
   end
-  local info = vim.fn.getqflist({ winid = 1 })
-  if self:_cursor_qf_is_current() and info.winid and info.winid ~= 0 then
-    self.binding_manager:register_review_bindings(vim.api.nvim_win_get_buf(info.winid))
-  end
+  self:_sync_review_qf_bindings()
 end
 
 function AppManager:accept_change(path, opts)
@@ -1647,7 +1705,7 @@ function AppManager:accept_change(path, opts)
     return false
   end
   self:_clear_review_entry(path)
-  self:_save_file_buffers(path)
+  self:_reload_clean_buffers_from_disk(path)
   if not opts.nosync then
     self:_sync_changes_quickfix(false)
   end
@@ -1682,8 +1740,9 @@ function AppManager:reject_change(path, opts)
   elseif not opts.silent then
     vim.notify('Already matches snapshot: ' .. vim.fn.fnamemodify(normalized, ':.'), vim.log.levels.INFO)
   end
+  -- Disk is the restored baseline. Refresh clean buffers only.
+  self:_reload_clean_buffers_from_disk(normalized)
   self:_clear_review_entry(normalized)
-  self:_save_file_buffers(normalized)
   if not opts.nosync then
     self:_sync_changes_quickfix(false)
   end
