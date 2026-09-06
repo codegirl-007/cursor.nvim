@@ -1041,9 +1041,8 @@ function AppManager:open_affected_file_under_cursor()
 
   local current_buf = vim.api.nvim_get_current_buf()
   local in_chat = current_buf == self.window_manager.chat_bufnr
-  local in_affected = self.window_manager.affected_bufnr and current_buf == self.window_manager.affected_bufnr
   local in_queue = self.window_manager.queue_bufnr and current_buf == self.window_manager.queue_bufnr
-  if not in_chat and not in_affected and not in_queue then
+  if not in_chat and not in_queue then
     return false
   end
 
@@ -1092,13 +1091,11 @@ function AppManager:cycle_focus_forward()
 
   local current_win = vim.api.nvim_get_current_win()
   local chat_win = self.window_manager.chat_winid
-  local affected_win = self.window_manager.affected_winid
   local queue_win = self.window_manager.queue_winid
   local input_win = self.window_manager.input_winid
 
   local order = {
     chat_win,
-    affected_win,
     queue_win,
     input_win,
   }
@@ -1265,9 +1262,8 @@ function AppManager:_queue_index_from_current_line()
 
   local current_buf = vim.api.nvim_get_current_buf()
   local in_chat = current_buf == self.window_manager.chat_bufnr
-  local in_affected = self.window_manager.affected_bufnr and current_buf == self.window_manager.affected_bufnr
   local in_queue = self.window_manager.queue_bufnr and current_buf == self.window_manager.queue_bufnr
-  if not in_chat and not in_affected and not in_queue then
+  if not in_chat and not in_queue then
     return nil
   end
 
