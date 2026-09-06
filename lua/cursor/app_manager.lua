@@ -309,6 +309,9 @@ function AppManager:set_model(model_id)
   if not model_id or model_id == '' then
     return
   end
+  if model_id == self:get_effective_model() then
+    return
+  end
   -- Hold the queue across the model change so stop/cancel cannot start
   -- the next request on the old process, and so a late completion
   -- callback cannot drain the queue before the new model is ready.
